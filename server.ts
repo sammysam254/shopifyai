@@ -1,5 +1,4 @@
 import express from "express";
-import path from "path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
@@ -562,35 +561,11 @@ app.get("/api/products", async (req, res) => {
 // Export for Netlify Functions
 export const handler = serverless(app);
 
-// Local server setup
+// Local development: run with `npm run dev` (tsx server.ts)
+// Vite dev server is started separately — do not import vite here.
 if (process.env.NODE_ENV !== "production" && !process.env.NETLIFY) {
-  const startLocalServer = async () => {
-    // Dynamic import so Vite is never bundled into the Netlify function
-    const { createServer: createViteServer } = await import("vite");
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    
-    app.use(vite.middlewares);
-    
-    const PORT = Number(process.env.PORT) || 3000;
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`Development server running at http://localhost:${PORT}`);
-    });
-  };
-
-  startLocalServer();
-} else if (process.env.NODE_ENV === "production" && !process.env.NETLIFY) {
-  // Standard production server (non-serverless)
-  const distPath = path.join(process.cwd(), "dist");
-  app.use(express.static(distPath));
-  app.get("*", (req, res) => {
-    res.sendFile(path.join(distPath, "index.html"));
-  });
-  
-    const PORT = Number(process.env.PORT) || 3000;
+  const PORT = Number(process.env.PORT) || 3000;
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Production server running at http://localhost:${PORT}`);
+    console.log(`Server running at http://localhost:${PORT}`);
   });
 }
