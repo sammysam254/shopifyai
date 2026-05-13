@@ -60,6 +60,7 @@ Deno.serve(async (req: Request) => {
     SHOPIFY_CLIENT_ID: Deno.env.get("SHOPIFY_CLIENT_ID") ?? "",
     SHOPIFY_CLIENT_SECRET: Deno.env.get("SHOPIFY_CLIENT_SECRET") ?? "",
     SHOPIFY_SHOP_DOMAIN: Deno.env.get("SHOPIFY_SHOP_DOMAIN") ?? "",
+    SHOPIFY_ACCESS_TOKEN: Deno.env.get("SHOPIFY_ACCESS_TOKEN") ?? "",
     APP_URL: Deno.env.get("APP_URL") ?? "",
     META_ADS_ACCESS_TOKEN: Deno.env.get("META_ADS_ACCESS_TOKEN") ?? "",
     META_AD_ACCOUNT_ID: Deno.env.get("META_AD_ACCOUNT_ID") ?? "",

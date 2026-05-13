@@ -51363,6 +51363,43 @@ var supabase = createClient(supabaseUrl, supabaseServiceKey, {
     transport: wrapper_default
   }
 });
+async function autoConnectShopify() {
+  if (!isSupabaseConfigured) return;
+  try {
+    const { data: existing } = await supabase.from("settings").select("id").eq("id", "shopify").single();
+    if (existing) {
+      console.log("[Shopify Auto-Connect] Already connected, skipping.");
+      return;
+    }
+    const config = await getConfig();
+    const { SHOPIFY_ACCESS_TOKEN, SHOPIFY_SHOP_DOMAIN } = config;
+    if (!SHOPIFY_ACCESS_TOKEN || !SHOPIFY_SHOP_DOMAIN) {
+      console.log("[Shopify Auto-Connect] Credentials not found in vault, skipping.");
+      return;
+    }
+    const fullShop = SHOPIFY_SHOP_DOMAIN.includes(".") ? SHOPIFY_SHOP_DOMAIN : `${SHOPIFY_SHOP_DOMAIN}.myshopify.com`;
+    const shopInfoRes = await fetch(`https://${fullShop}/admin/api/2024-01/shop.json`, {
+      headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN }
+    });
+    if (!shopInfoRes.ok) {
+      console.error("[Shopify Auto-Connect] Failed to fetch shop info:", shopInfoRes.status);
+      return;
+    }
+    const shopInfo = await shopInfoRes.json();
+    const displayName = shopInfo?.shop?.name || SHOPIFY_SHOP_DOMAIN;
+    await supabase.from("settings").upsert({
+      id: "shopify",
+      accessToken: SHOPIFY_ACCESS_TOKEN,
+      shop: displayName,
+      config: { domain: SHOPIFY_SHOP_DOMAIN },
+      connectedAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    console.log(`[Shopify Auto-Connect] Successfully connected to ${displayName}`);
+  } catch (e) {
+    console.error("[Shopify Auto-Connect] Exception:", e);
+  }
+}
+autoConnectShopify();
 var secretsCache = null;
 var secretsCacheExpiry = 0;
 var SECRETS_TTL_MS = 5 * 60 * 1e3;
@@ -51408,6 +51445,7 @@ async function getConfig() {
     SHOPIFY_CLIENT_ID: process.env.SHOPIFY_CLIENT_ID || proxied.SHOPIFY_CLIENT_ID || "",
     SHOPIFY_CLIENT_SECRET: process.env.SHOPIFY_CLIENT_SECRET || proxied.SHOPIFY_CLIENT_SECRET || "",
     SHOPIFY_SHOP_DOMAIN: process.env.SHOPIFY_SHOP_DOMAIN || proxied.SHOPIFY_SHOP_DOMAIN || "",
+    SHOPIFY_ACCESS_TOKEN: process.env.SHOPIFY_ACCESS_TOKEN || proxied.SHOPIFY_ACCESS_TOKEN || "",
     APP_URL: process.env.APP_URL || proxied.APP_URL || "",
     META_ADS_ACCESS_TOKEN: process.env.META_ADS_ACCESS_TOKEN || proxied.META_ADS_ACCESS_TOKEN || "",
     META_AD_ACCOUNT_ID: process.env.META_AD_ACCOUNT_ID || proxied.META_AD_ACCOUNT_ID || ""
@@ -51577,7 +51615,15 @@ app.post("/api/marketing/launch", async (req, res) => {
 app.get("/api/shopify/status", async (req, res) => {
   try {
     const { data: docSnap } = await supabase.from("settings").select("*").eq("id", "shopify").single();
-    res.json({ connected: !!docSnap, shop: docSnap?.shop });
+    if (docSnap?.accessToken) {
+      return res.json({ connected: true, shop: docSnap.shop });
+    }
+    const config = await getConfig();
+    if (config.SHOPIFY_ACCESS_TOKEN && config.SHOPIFY_SHOP_DOMAIN) {
+      autoConnectShopify();
+      return res.json({ connected: true, shop: config.SHOPIFY_SHOP_DOMAIN });
+    }
+    res.json({ connected: false });
   } catch (error) {
     res.json({ connected: false });
   }

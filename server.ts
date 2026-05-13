@@ -43,6 +43,73 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey, {
 });
 
 // ---------------------------------------------------------------------------
+// Auto-connect Shopify if credentials are in vault
+// This runs once on cold start. If SHOPIFY_ACCESS_TOKEN and SHOPIFY_SHOP_DOMAIN
+// are set in Supabase secrets, the connection is auto-registered in the settings table.
+// ---------------------------------------------------------------------------
+async function autoConnectShopify() {
+  if (!isSupabaseConfigured) return;
+
+  try {
+    // Check if already connected
+    const { data: existing } = await supabase
+      .from("settings")
+      .select("id")
+      .eq("id", "shopify")
+      .single();
+
+    if (existing) {
+      console.log("[Shopify Auto-Connect] Already connected, skipping.");
+      return;
+    }
+
+    // Load secrets
+    const config = await getConfig();
+    const { SHOPIFY_ACCESS_TOKEN, SHOPIFY_SHOP_DOMAIN } = config;
+
+    if (!SHOPIFY_ACCESS_TOKEN || !SHOPIFY_SHOP_DOMAIN) {
+      console.log("[Shopify Auto-Connect] Credentials not found in vault, skipping.");
+      return;
+    }
+
+    // Fetch shop info using the access token
+    const fullShop = SHOPIFY_SHOP_DOMAIN.includes(".") 
+      ? SHOPIFY_SHOP_DOMAIN 
+      : `${SHOPIFY_SHOP_DOMAIN}.myshopify.com`;
+
+    const shopInfoRes = await fetch(`https://${fullShop}/admin/api/2024-01/shop.json`, {
+      headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN }
+    });
+
+    if (!shopInfoRes.ok) {
+      console.error("[Shopify Auto-Connect] Failed to fetch shop info:", shopInfoRes.status);
+      return;
+    }
+
+    const shopInfo: any = await shopInfoRes.json();
+    const displayName = shopInfo?.shop?.name || SHOPIFY_SHOP_DOMAIN;
+
+    // Save to settings table
+    await supabase
+      .from("settings")
+      .upsert({
+        id: "shopify",
+        accessToken: SHOPIFY_ACCESS_TOKEN,
+        shop: displayName,
+        config: { domain: SHOPIFY_SHOP_DOMAIN },
+        connectedAt: new Date().toISOString()
+      });
+
+    console.log(`[Shopify Auto-Connect] Successfully connected to ${displayName}`);
+  } catch (e) {
+    console.error("[Shopify Auto-Connect] Exception:", e);
+  }
+}
+
+// Run auto-connect on startup (non-blocking)
+autoConnectShopify();
+
+// ---------------------------------------------------------------------------
 // Secrets cache — fetched once from the Supabase secrets-proxy Edge Function.
 // TTL is 5 minutes so a redeploy of secrets takes effect quickly.
 // ---------------------------------------------------------------------------
@@ -101,6 +168,7 @@ async function getConfig() {
     SHOPIFY_CLIENT_ID:     process.env.SHOPIFY_CLIENT_ID     || proxied.SHOPIFY_CLIENT_ID     || "",
     SHOPIFY_CLIENT_SECRET: process.env.SHOPIFY_CLIENT_SECRET || proxied.SHOPIFY_CLIENT_SECRET || "",
     SHOPIFY_SHOP_DOMAIN:   process.env.SHOPIFY_SHOP_DOMAIN   || proxied.SHOPIFY_SHOP_DOMAIN   || "",
+    SHOPIFY_ACCESS_TOKEN:  process.env.SHOPIFY_ACCESS_TOKEN  || proxied.SHOPIFY_ACCESS_TOKEN  || "",
     APP_URL:               process.env.APP_URL               || proxied.APP_URL               || "",
     META_ADS_ACCESS_TOKEN: process.env.META_ADS_ACCESS_TOKEN || proxied.META_ADS_ACCESS_TOKEN || "",
     META_AD_ACCOUNT_ID:    process.env.META_AD_ACCOUNT_ID    || proxied.META_AD_ACCOUNT_ID    || "",
@@ -332,13 +400,26 @@ app.post("/api/marketing/launch", async (req, res) => {
 // Shopify Status
 app.get("/api/shopify/status", async (req, res) => {
   try {
+    // First check the settings table (set by auto-connect or OAuth)
     const { data: docSnap } = await supabase
       .from("settings")
       .select("*")
       .eq("id", "shopify")
       .single();
 
-    res.json({ connected: !!docSnap, shop: docSnap?.shop });
+    if (docSnap?.accessToken) {
+      return res.json({ connected: true, shop: docSnap.shop });
+    }
+
+    // Fallback: check if credentials exist in vault (auto-connect may still be running)
+    const config = await getConfig();
+    if (config.SHOPIFY_ACCESS_TOKEN && config.SHOPIFY_SHOP_DOMAIN) {
+      // Trigger auto-connect in background and return optimistic status
+      autoConnectShopify();
+      return res.json({ connected: true, shop: config.SHOPIFY_SHOP_DOMAIN });
+    }
+
+    res.json({ connected: false });
   } catch (error) {
     res.json({ connected: false });
   }
