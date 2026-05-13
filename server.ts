@@ -131,9 +131,15 @@ async function autoConnectShopify() {
 autoConnectShopify();
 
 // ---------------------------------------------------------------------------
-// Gemini AI client (lazy)
+// Gemini AI client (lazy) with model fallback chain
 // ---------------------------------------------------------------------------
 let aiClient: GoogleGenerativeAI | null = null;
+const GEMINI_MODEL_FALLBACKS = [
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-pro",
+];
+
 async function getAi() {
   if (!aiClient) {
     const config = await getConfig();
@@ -141,6 +147,29 @@ async function getAi() {
     aiClient = new GoogleGenerativeAI(config.GEMINI_API_KEY);
   }
   return aiClient;
+}
+
+async function generateWithFallback(prompt: string): Promise<string> {
+  const ai = await getAi();
+  let lastError: any;
+  for (const modelName of GEMINI_MODEL_FALLBACKS) {
+    try {
+      const model = ai.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent(prompt);
+      const text = result.response.text();
+      console.log(`[Gemini] Success with model: ${modelName}`);
+      return text;
+    } catch (err: any) {
+      console.warn(`[Gemini] Model ${modelName} failed: ${err?.message?.substring(0, 120)}`);
+      lastError = err;
+      // Only continue to next model on quota/not-found errors
+      const msg = err?.message || "";
+      if (!msg.includes("429") && !msg.includes("404") && !msg.includes("quota") && !msg.includes("not found")) {
+        throw err;
+      }
+    }
+  }
+  throw lastError;
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +199,6 @@ app.get("/api/health", async (_req, res) => {
 app.post("/api/evaluate-product", async (req, res) => {
   try {
     const { id, title, sourceCountry, trendScore } = req.body;
-    const ai = await getAi();
     const prompt = `Evaluate this product for the North American (USA/Canada) market:
 Title: ${title}
 Source Country: ${sourceCountry}
@@ -178,9 +206,7 @@ Trend Score: ${trendScore}
 If suitable, rewrite the title and create a persuasive SEO-optimized description.
 Return ONLY valid JSON:
 {"suitable":boolean,"reason":string,"optimized_title":string,"optimized_description":string,"tags":string[]}`;
-    const model = ai.getGenerativeModel({ model: "gemini-2.0-flash" });
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
+    const text = await generateWithFallback(prompt);
     const evaluation = JSON.parse(text.replace(/```json/g, "").replace(/```/g, "").trim());
     if (id) {
       await supabase.from("trending_products").update({
@@ -264,8 +290,6 @@ app.get("/api/marketing/status", async (_req, res) => {
 
 app.get("/api/scout-trends", async (_req, res) => {
   try {
-    const ai = await getAi();
-    const model = ai.getGenerativeModel({ model: "gemini-2.0-flash" });
     const prompt = `Return a JSON array of exactly 5 trending consumer products that are popular right now for dropshipping to North America.
 Each object must have exactly these fields:
 {"title":"Product Name","source_country":"China","trend_score":92,"image_url":"https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=800"}
@@ -275,8 +299,7 @@ Rules:
 - image_url must be a real Unsplash URL
 - Output ONLY the raw JSON array. No markdown, no code blocks, no extra text.`;
 
-    const result = await model.generateContent(prompt);
-    const rawText = result.response.text();
+    const rawText = await generateWithFallback(prompt);
     
     // Strip any markdown code fences
     const cleanedText = rawText
