@@ -51483,7 +51483,7 @@ Trend Score: ${trendScore}
 If suitable, rewrite the title and create a persuasive SEO-optimized description.
 Return ONLY valid JSON:
 {"suitable":boolean,"reason":string,"optimized_title":string,"optimized_description":string,"tags":string[]}`;
-    const model = ai.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = ai.getGenerativeModel({ model: "gemini-2.0-flash" });
     const result = await model.generateContent(prompt);
     const text = result.response.text();
     const evaluation = JSON.parse(text.replace(/```json/g, "").replace(/```/g, "").trim());
@@ -51564,7 +51564,7 @@ app.get("/api/marketing/status", async (_req, res) => {
 app.get("/api/scout-trends", async (_req, res) => {
   try {
     const ai = await getAi();
-    const model = ai.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = ai.getGenerativeModel({ model: "gemini-2.0-flash" });
     const prompt = `Return a JSON array of exactly 5 trending consumer products that are popular right now for dropshipping to North America.
 Each object must have exactly these fields:
 {"title":"Product Name","source_country":"China","trend_score":92,"image_url":"https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=800"}
