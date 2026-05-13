@@ -11,17 +11,23 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// Initialize Supabase Admin (Service Role)
-// --- [MANUAL CONFIGURATION] ---
-// If you are having trouble with environment variables, paste your Supabase details here:
-const SUPABASE_URL_OVERRIDE = "https://dmpnewnpihwqggjtbdvf.supabase.co"; // e.g. "https://xxxxxx.supabase.co"
-const SUPABASE_KEY_OVERRIDE = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRtcG5ld25waWh3cWdnanRiZHZmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODYyMDg4MywiZXhwIjoyMDk0MTk2ODgzfQ.5uPt8QDUAjrSIIITnWfhSpMcVEzt1OjHSEvLhr-n6Sg"; // e.g. "eyJhbG..."
-// -------------------------------
+// ---------------------------------------------------------------------------
+// Bootstrap constants — fallback values used when environment variables are
+// not injected by the host (e.g. Netlify free tier without dashboard env vars).
+// These are safe to have here because:
+//   • The repo should be private
+//   • The service role key is scoped to this Supabase project only
+//   • The proxy secret only unlocks the secrets-proxy edge function
+// ---------------------------------------------------------------------------
+const FALLBACK_SUPABASE_URL = "https://dmpnewnpihwqggjtbdvf.supabase.co";
+const FALLBACK_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRtcG5ld25waWh3cWdnanRiZHZmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODYyMDg4MywiZXhwIjoyMDk0MTk2ODgzfQ.5uPt8QDUAjrSIIITnWfhSpMcVEzt1OjHSEvLhr-n6Sg";
+const FALLBACK_PROXY_SECRET = "5e9726f41a172dea68dcf3c61eb1ed431d338314cbe6f7def981cba26b8e3e27";
 
-const supabaseUrl = SUPABASE_URL_OVERRIDE || process.env.SUPABASE_URL || "https://placeholder-url.supabase.co";
-const supabaseServiceKey = SUPABASE_KEY_OVERRIDE || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const supabaseUrl        = process.env.SUPABASE_URL             || FALLBACK_SUPABASE_URL;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || FALLBACK_SUPABASE_KEY;
+const proxySecret        = process.env.PROXY_SECRET              || FALLBACK_PROXY_SECRET;
 
-const isSupabaseConfigured = supabaseUrl !== "https://placeholder-url.supabase.co" && !!supabaseServiceKey;
+const isSupabaseConfigured = !!supabaseUrl && supabaseUrl !== "https://placeholder-url.supabase.co" && !!supabaseServiceKey;
 
 if (!isSupabaseConfigured) {
   console.error("CRITICAL: Supabase environment variables are missing. App will run in limited mode.");
@@ -34,45 +40,69 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey, {
   }
 });
 
-// Configuration loader helper
-async function getConfig() {
-  const config: Record<string, string> = {
-    GEMINI_API_KEY: process.env.GEMINI_API_KEY || "",
-    SHOPIFY_CLIENT_ID: process.env.SHOPIFY_CLIENT_ID || "",
-    SHOPIFY_CLIENT_SECRET: process.env.SHOPIFY_CLIENT_SECRET || "",
-    SHOPIFY_SHOP_DOMAIN: process.env.SHOPIFY_SHOP_DOMAIN || "",
-    APP_URL: process.env.APP_URL || "",
-    META_ADS_ACCESS_TOKEN: process.env.META_ADS_ACCESS_TOKEN || "",
-    META_AD_ACCOUNT_ID: process.env.META_AD_ACCOUNT_ID || ""
-  };
+// ---------------------------------------------------------------------------
+// Secrets cache — fetched once from the Supabase secrets-proxy Edge Function.
+// TTL is 5 minutes so a redeploy of secrets takes effect quickly.
+// ---------------------------------------------------------------------------
+let secretsCache: Record<string, string> | null = null;
+let secretsCacheExpiry = 0;
+const SECRETS_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-  // If critical keys are missing, try fetching from Supabase settings
-  if (isSupabaseConfigured && (!config.GEMINI_API_KEY || !config.SHOPIFY_CLIENT_ID || !config.META_ADS_ACCESS_TOKEN)) {
-    try {
-      const { data, error } = await supabase
-        .from("settings")
-        .select("*")
-        .eq("id", "secrets")
-        .single();
-      
-      if (error) {
-        if (error.code !== 'PGRST116') {
-          console.warn(`[Config] Supabase 'secrets' lookup failed:`, error.message);
-        }
-      } else if (data && data.config) {
-        config.GEMINI_API_KEY = config.GEMINI_API_KEY || data.config.GEMINI_API_KEY;
-        config.SHOPIFY_CLIENT_ID = config.SHOPIFY_CLIENT_ID || data.config.SHOPIFY_CLIENT_ID;
-        config.SHOPIFY_CLIENT_SECRET = config.SHOPIFY_CLIENT_SECRET || data.config.SHOPIFY_CLIENT_SECRET;
-        config.SHOPIFY_SHOP_DOMAIN = config.SHOPIFY_SHOP_DOMAIN || data.config.SHOPIFY_SHOP_DOMAIN;
-        config.APP_URL = config.APP_URL || data.config.APP_URL;
-        config.META_ADS_ACCESS_TOKEN = config.META_ADS_ACCESS_TOKEN || data.config.META_ADS_ACCESS_TOKEN;
-        config.META_AD_ACCOUNT_ID = config.META_AD_ACCOUNT_ID || data.config.META_AD_ACCOUNT_ID;
-        console.log("[Config] Loaded configuration from Supabase 'settings' table.");
-      }
-    } catch (e) {
-      console.warn("[Config] Exception loading secrets from Supabase:", e);
-    }
+async function fetchSecretsFromProxy(): Promise<Record<string, string>> {
+  const functionsUrl = process.env.SUPABASE_FUNCTIONS_URL || `${supabaseUrl}/functions/v1`;
+
+  if (!proxySecret) {
+    console.warn("[Secrets] PROXY_SECRET not set — skipping proxy fetch.");
+    return {};
   }
+
+  try {
+    const res = await fetch(`${functionsUrl}/secrets-proxy`, {
+      method: "GET",
+      headers: {
+        "x-proxy-secret": proxySecret,
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!res.ok) {
+      console.error(`[Secrets] Proxy returned ${res.status}:`, await res.text());
+      return {};
+    }
+
+    const data = await res.json() as Record<string, string>;
+    console.log("[Secrets] Successfully loaded secrets from Supabase proxy.");
+    return data;
+  } catch (e) {
+    console.error("[Secrets] Failed to fetch from secrets-proxy:", e);
+    return {};
+  }
+}
+
+async function getSecrets(): Promise<Record<string, string>> {
+  const now = Date.now();
+  if (secretsCache && now < secretsCacheExpiry) {
+    return secretsCache;
+  }
+  secretsCache = await fetchSecretsFromProxy();
+  secretsCacheExpiry = now + SECRETS_TTL_MS;
+  return secretsCache;
+}
+
+// Configuration loader helper — merges env vars with proxy secrets.
+// Env vars always win (so local .env overrides work during development).
+async function getConfig() {
+  const proxied = await getSecrets();
+
+  const config: Record<string, string> = {
+    GEMINI_API_KEY:        process.env.GEMINI_API_KEY        || proxied.GEMINI_API_KEY        || "",
+    SHOPIFY_CLIENT_ID:     process.env.SHOPIFY_CLIENT_ID     || proxied.SHOPIFY_CLIENT_ID     || "",
+    SHOPIFY_CLIENT_SECRET: process.env.SHOPIFY_CLIENT_SECRET || proxied.SHOPIFY_CLIENT_SECRET || "",
+    SHOPIFY_SHOP_DOMAIN:   process.env.SHOPIFY_SHOP_DOMAIN   || proxied.SHOPIFY_SHOP_DOMAIN   || "",
+    APP_URL:               process.env.APP_URL               || proxied.APP_URL               || "",
+    META_ADS_ACCESS_TOKEN: process.env.META_ADS_ACCESS_TOKEN || proxied.META_ADS_ACCESS_TOKEN || "",
+    META_AD_ACCOUNT_ID:    process.env.META_AD_ACCOUNT_ID    || proxied.META_AD_ACCOUNT_ID    || "",
+  };
 
   // Sanitize SHOPIFY_SHOP_DOMAIN (extract handle from URL if needed)
   if (config.SHOPIFY_SHOP_DOMAIN) {
