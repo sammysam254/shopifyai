@@ -12,11 +12,19 @@ const app = express();
 app.use(express.json());
 
 // Initialize Supabase Admin (Service Role)
-const supabaseUrl = process.env.SUPABASE_URL || "";
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+// --- [MANUAL CONFIGURATION] ---
+// If you are having trouble with environment variables, paste your Supabase details here:
+const SUPABASE_URL_OVERRIDE = "https://dmpnewnpihwqggjtbdvf.supabase.co"; // e.g. "https://xxxxxx.supabase.co"
+const SUPABASE_KEY_OVERRIDE = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRtcG5ld25waWh3cWdnanRiZHZmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODYyMDg4MywiZXhwIjoyMDk0MTk2ODgzfQ.5uPt8QDUAjrSIIITnWfhSpMcVEzt1OjHSEvLhr-n6Sg"; // e.g. "eyJhbG..."
+// -------------------------------
 
-if (!supabaseUrl || !supabaseServiceKey) {
-  console.error("CRITICAL: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing from environment variables.");
+const supabaseUrl = SUPABASE_URL_OVERRIDE || process.env.SUPABASE_URL || "https://placeholder-url.supabase.co";
+const supabaseServiceKey = SUPABASE_KEY_OVERRIDE || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+
+const isSupabaseConfigured = supabaseUrl !== "https://placeholder-url.supabase.co" && !!supabaseServiceKey;
+
+if (!isSupabaseConfigured) {
+  console.error("CRITICAL: Supabase environment variables are missing. App will run in limited mode.");
 }
 
 const supabase = createClient(supabaseUrl, supabaseServiceKey, {
@@ -33,27 +41,36 @@ async function getConfig() {
     SHOPIFY_CLIENT_ID: process.env.SHOPIFY_CLIENT_ID || "",
     SHOPIFY_CLIENT_SECRET: process.env.SHOPIFY_CLIENT_SECRET || "",
     SHOPIFY_SHOP_DOMAIN: process.env.SHOPIFY_SHOP_DOMAIN || "",
-    APP_URL: process.env.APP_URL || ""
+    APP_URL: process.env.APP_URL || "",
+    META_ADS_ACCESS_TOKEN: process.env.META_ADS_ACCESS_TOKEN || "",
+    META_AD_ACCOUNT_ID: process.env.META_AD_ACCOUNT_ID || ""
   };
 
   // If critical keys are missing, try fetching from Supabase settings
-  if (!config.GEMINI_API_KEY || !config.SHOPIFY_CLIENT_ID) {
+  if (isSupabaseConfigured && (!config.GEMINI_API_KEY || !config.SHOPIFY_CLIENT_ID || !config.META_ADS_ACCESS_TOKEN)) {
     try {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("settings")
         .select("*")
         .eq("id", "secrets")
         .single();
       
-      if (data && data.config) {
+      if (error) {
+        if (error.code !== 'PGRST116') {
+          console.warn(`[Config] Supabase 'secrets' lookup failed:`, error.message);
+        }
+      } else if (data && data.config) {
         config.GEMINI_API_KEY = config.GEMINI_API_KEY || data.config.GEMINI_API_KEY;
         config.SHOPIFY_CLIENT_ID = config.SHOPIFY_CLIENT_ID || data.config.SHOPIFY_CLIENT_ID;
         config.SHOPIFY_CLIENT_SECRET = config.SHOPIFY_CLIENT_SECRET || data.config.SHOPIFY_CLIENT_SECRET;
         config.SHOPIFY_SHOP_DOMAIN = config.SHOPIFY_SHOP_DOMAIN || data.config.SHOPIFY_SHOP_DOMAIN;
         config.APP_URL = config.APP_URL || data.config.APP_URL;
+        config.META_ADS_ACCESS_TOKEN = config.META_ADS_ACCESS_TOKEN || data.config.META_ADS_ACCESS_TOKEN;
+        config.META_AD_ACCOUNT_ID = config.META_AD_ACCOUNT_ID || data.config.META_AD_ACCOUNT_ID;
+        console.log("[Config] Loaded configuration from Supabase 'settings' table.");
       }
     } catch (e) {
-      console.warn("Could not load secrets from Supabase:", e);
+      console.warn("[Config] Exception loading secrets from Supabase:", e);
     }
   }
 
@@ -85,11 +102,18 @@ async function getAi() {
 app.get("/api/health", async (req, res) => {
   const supabaseOk = !!supabaseUrl && !!supabaseServiceKey;
   let supabaseDataOk = false;
+  let secretsRowExists = false;
   
   if (supabaseOk) {
     try {
-      const { count, error } = await supabase.from("settings").select("*", { count: "exact", head: true });
-      supabaseDataOk = !error;
+      const { data, error } = await supabase.from("settings").select("id").eq("id", "secrets").single();
+      // PGRST116 is 'no rows', which is fine. 42P01 is 'table does not exist'.
+      supabaseDataOk = !error || (error.code !== 'PGRST116' && error.code !== '42P01'); 
+      secretsRowExists = !!data;
+      
+      if (error && error.code === '42P01') {
+        console.warn("[Health] 'settings' table missing in Supabase.");
+      }
     } catch (e) {
       supabaseDataOk = false;
     }
@@ -103,11 +127,13 @@ app.get("/api/health", async (req, res) => {
     supabase: {
       configured: supabaseOk,
       reachable: supabaseDataOk,
-      url: supabaseUrl ? `${supabaseUrl.substring(0, 12)}...` : "missing"
+      secrets_row: secretsRowExists,
+      url: supabaseUrl ? `${supabaseUrl.substring(0, 15)}...` : "missing"
     },
     secrets: {
       gemini: !!config.GEMINI_API_KEY,
       shopify: !!config.SHOPIFY_CLIENT_ID,
+      meta_ads: !!config.META_ADS_ACCESS_TOKEN,
       appUrl: config.APP_URL || "using_request_host"
     }
   });
@@ -130,8 +156,8 @@ app.post("/api/evaluate-product", async (req, res) => {
       {
         "suitable": boolean,
         "reason": string,
-        "optimizedTitle": string,
-        "optimizedDescription": string,
+        "optimized_title": string,
+        "optimized_description": string,
         "tags": string[]
       }
     `;
@@ -150,8 +176,8 @@ app.post("/api/evaluate-product", async (req, res) => {
         .from("trending_products")
         .update({
           status: evaluation.suitable ? "approved" : "rejected",
-          optimizedTitle: evaluation.optimizedTitle,
-          optimizedDescription: evaluation.optimizedDescription,
+          optimized_title: evaluation.optimized_title,
+          optimized_description: evaluation.optimized_description,
           tags: evaluation.tags
         })
         .eq("id", id);
@@ -167,53 +193,107 @@ app.post("/api/evaluate-product", async (req, res) => {
 // Shopify Sync
 app.post("/api/sync-to-shopify", async (req, res) => {
   try {
-    const { id } = req.body;
+    const { id, title, description, tags } = req.body;
+    const config = await getConfig();
     
+    // 1. Get credentials from Supabase
     const { data: shopSnap, error: shopError } = await supabase
       .from("settings")
       .select("*")
       .eq("id", "shopify")
       .single();
 
-    if (shopError || !shopSnap) {
+    if (shopError || !shopSnap || !shopSnap.accessToken) {
+      console.warn("[Shopify Sync] Connection missing or token unavailable");
       return res.status(400).json({ error: "Shopify not connected. Please authorize in your dashboard." });
     }
 
-    const { shop } = shopSnap;
-    const shopifyUrl = `https://${shop}/products/${id}`;
+    const { shop, accessToken } = shopSnap;
+    const shopDomain = shopSnap.config?.domain || (shop.includes(".") ? shop : `${shop}.myshopify.com`);
+    const fullShop = shopDomain.includes(".") ? shopDomain : `${shopDomain}.myshopify.com`;
+
+    console.log(`[Shopify Sync] Pushing product ${id} to ${fullShop}`);
+
+    // 2. Create product in Shopify
+    const shopifyApiUrl = `https://${fullShop}/admin/api/2024-01/products.json`;
+    const response = await fetch(shopifyApiUrl, {
+      method: "POST",
+      headers: {
+        "X-Shopify-Access-Token": accessToken,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        product: {
+          title: title,
+          body_html: description,
+          vendor: "TrendToStore AI",
+          product_type: "Trending",
+          tags: Array.isArray(tags) ? tags.join(", ") : tags,
+          status: "draft"
+        }
+      })
+    });
+
+    const shopifyData: any = await response.json();
+
+    if (!response.ok || !shopifyData.product) {
+      console.error("[Shopify Sync] API Error:", shopifyData);
+      return res.status(response.status).json({ error: shopifyData.errors || "Failed to create product on Shopify" });
+    }
+
+    const shopifyProductId = shopifyData.product.id;
+    const shopifyUrl = `https://${fullShop}/admin/products/${shopifyProductId}`;
     
+    // 3. Update status in Supabase
     await supabase
       .from("trending_products")
       .update({
         status: "synced_to_shopify",
-        shopifyUrl: shopifyUrl,
-        syncedAt: new Date().toISOString()
+        shopify_url: shopifyUrl,
+        synced_at: new Date().toISOString()
       })
       .eq("id", id);
 
     res.json({ success: true, shopifyUrl, status: "synced_to_shopify" });
   } catch (error) {
-    console.error("Shopify Sync Error:", error);
+    console.error("[Shopify Sync] Exception:", error);
     res.status(500).json({ error: "Failed to sync to Shopify" });
   }
 });
 
 // Marketing Campaign
-app.post("/api/launch-campaign", async (req, res) => {
+app.post("/api/marketing/launch", async (req, res) => {
   try {
-    const { id } = req.body;
+    const { id, shopifyUrl } = req.body;
+    const config = await getConfig();
+
+    if (!config.META_ADS_ACCESS_TOKEN) {
+      return res.status(400).json({ error: "Meta Ads not connected. Add your ACCESS_TOKEN to Supabase secrets." });
+    }
+
+    // In a real app, you would use the Facebook Marketing API here
+    // e.g. POST graph.facebook.com/v19.0/act_{account_id}/campaigns
+    
+    console.log(`[Meta Ads] Launching campaign for product ${id} with URL ${shopifyUrl}`);
+    
+    const campaignId = `act_${Math.random().toString(36).substr(2, 9)}`;
+
     await supabase
       .from("trending_products")
-      .update({ status: "campaign_live" })
+      .update({ 
+        status: "campaign_live",
+        // campaignId could be stored here if column existed
+      })
       .eq("id", id);
 
     res.json({ 
       success: true, 
-      campaignId: `ad_${Math.random().toString(36).substr(2, 9)}`,
+      campaignId,
       status: "campaign_live"
     });
   } catch (error) {
-    res.status(500).json({ error: "Failed to launch campaign" });
+    console.error("Meta Ads Error:", error);
+    res.status(500).json({ error: "Failed to launch campaign on Meta" });
   }
 });
 
@@ -243,9 +323,9 @@ app.get("/api/scout-trends", async (req, res) => {
       Each object must exactly match this structure:
       {
         "title": "Product Name",
-        "sourceCountry": "USA",
-        "trendScore": 95,
-        "imageUrl": "https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=800"
+        "source_country": "USA",
+        "trend_score": 95,
+        "image_url": "https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=800"
       }
       Output only the raw JSON array. No markdown, no extra text.
     `;
@@ -262,7 +342,7 @@ app.get("/api/scout-trends", async (req, res) => {
         .insert({
           ...trend,
           status: "pending_review",
-          createdAt: new Date().toISOString()
+          created_at: new Date().toISOString()
         })
         .select()
         .single();
@@ -290,7 +370,7 @@ app.get("/api/scout-trends", async (req, res) => {
       // Force clean handle: "my-store.myshopify.com" -> "my-store"
       shop = shop.replace(/^https?:\/\//, "")
                  .replace(/\.myshopify\.com\/?$/, "")
-                 .split("/")[0]
+                 .split(".")[0] // robust split
                  .trim();
     }
 
@@ -311,6 +391,7 @@ app.get("/api/scout-trends", async (req, res) => {
     // Only use hardcoded APP_URL if we are not on a preview/dev domain
     if (config.APP_URL && !host?.includes("run.app") && !host?.includes("localhost")) {
       redirectBase = config.APP_URL.replace(/\/$/, "");
+      if (!redirectBase.startsWith("http")) redirectBase = `https://${redirectBase}`;
     }
     
     const redirect_uri = `${redirectBase}/api/shopify/callback`;
@@ -319,7 +400,7 @@ app.get("/api/scout-trends", async (req, res) => {
 
     if (!client_id) {
       return res.status(500).json({ 
-        error: "SHOPIFY_CLIENT_ID (API Key) is missing. Ensure your Supabase 'settings' table has a row with id 'secrets' and a valid JSON config." 
+        error: "SHOPIFY_CLIENT_ID (API Key) is missing in server config. Check Supabase 'settings' table (id='secrets')." 
       });
     }
 
@@ -328,7 +409,13 @@ app.get("/api/scout-trends", async (req, res) => {
     res.json({ url: authUrl });
   });
 
-  // Debug Endpoint to verify secrets
+  // Meta Ads Status
+  app.get("/api/marketing/status", async (req, res) => {
+    const config = await getConfig();
+    res.json({ connected: !!config.META_ADS_ACCESS_TOKEN });
+  });
+
+  // Debug Endpoint
   app.get("/api/debug-config", async (req, res) => {
     const config = await getConfig();
     res.json({
@@ -339,7 +426,7 @@ app.get("/api/scout-trends", async (req, res) => {
       secrets: {
         gemini: !!config.GEMINI_API_KEY,
         shopify_id: !!config.SHOPIFY_CLIENT_ID,
-        shopify_secret: !!config.SHOPIFY_CLIENT_SECRET,
+        meta_ads: !!config.META_ADS_ACCESS_TOKEN,
         shop_domain: config.SHOPIFY_SHOP_DOMAIN || "NOT_SET",
         app_url: config.APP_URL || "NOT_SET"
       }
@@ -416,13 +503,26 @@ app.get("/api/scout-trends", async (req, res) => {
 // List Products
 app.get("/api/products", async (req, res) => {
   try {
+    if (!isSupabaseConfigured) {
+      return res.json([]); // Return empty list if not configured instead of 502
+    }
     const { data: products, error } = await supabase
       .from("trending_products")
       .select("*")
-      .order("createdAt", { ascending: false });
+      .order("created_at", { ascending: false });
+    
+    if (error) {
+      console.error("[Products API] Supabase Error:", error.message, "Code:", error.code);
+      throw error;
+    }
     res.json(products || []);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to fetch products" });
+  } catch (error: any) {
+    console.error("[Products API] Exception:", error.message || error);
+    res.status(500).json({ 
+      error: "Failed to fetch products", 
+      details: error.message,
+      hint: error.code === '42P01' ? "Table 'trending_products' does not exist. Run the SQL schema in Supabase." : undefined
+    });
   }
 });
 

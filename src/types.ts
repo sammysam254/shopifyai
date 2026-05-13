@@ -9,21 +9,21 @@ export enum ProductStatus {
 export interface TrendingProduct {
   id: string;
   title: string;
-  imageUrl: string;
-  sourceCountry: string;
-  trendScore: number;
+  image_url: string;
+  source_country: string;
+  trend_score: number;
   status: ProductStatus;
-  optimizedTitle?: string;
-  optimizedDescription?: string;
+  optimized_title?: string;
+  optimized_description?: string;
   tags?: string[];
-  shopifyUrl?: string;
-  createdAt: string;
+  shopify_url?: string;
+  created_at: string;
 }
 
 export interface EvaluationResult {
   suitable: boolean;
   reason: string;
-  optimizedTitle: string;
-  optimizedDescription: string;
+  optimized_title: string;
+  optimized_description: string;
   tags: string[];
 }

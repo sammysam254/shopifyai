@@ -5,32 +5,58 @@
 CREATE TABLE IF NOT EXISTS trending_products (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title TEXT NOT NULL,
-  imageUrl TEXT,
-  sourceCountry TEXT,
-  trendScore INTEGER,
+  image_url TEXT,
+  source_country TEXT,
+  trend_score INTEGER,
   status TEXT DEFAULT 'pending_review',
-  optimizedTitle TEXT,
-  optimizedDescription TEXT,
+  optimized_title TEXT,
+  optimized_description TEXT,
   tags TEXT[],
-  shopifyUrl TEXT,
-  syncedAt TIMESTAMPTZ,
-  createdAt TIMESTAMPTZ DEFAULT NOW(),
-  ownerId TEXT DEFAULT 'system'
+  shopify_url TEXT,
+  synced_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  owner_id TEXT DEFAULT 'system'
 );
+
+-- 1.1 Migration: Ensure columns exist (for those who already ran the old schema)
+DO $$ 
+BEGIN 
+    -- created_at
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trending_products' AND column_name='created_at') THEN
+        ALTER TABLE trending_products ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW();
+    END IF;
+    -- image_url
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trending_products' AND column_name='image_url') THEN
+        ALTER TABLE trending_products ADD COLUMN image_url TEXT;
+    END IF;
+    -- source_country
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trending_products' AND column_name='source_country') THEN
+        ALTER TABLE trending_products ADD COLUMN source_country TEXT;
+    END IF;
+    -- trend_score
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trending_products' AND column_name='trend_score') THEN
+        ALTER TABLE trending_products ADD COLUMN trend_score INTEGER;
+    END IF;
+    -- shopify_url
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='trending_products' AND column_name='shopify_url') THEN
+        ALTER TABLE trending_products ADD COLUMN shopify_url TEXT;
+    END IF;
+END $$;
 
 -- 2. Create Settings Table
 CREATE TABLE IF NOT EXISTS settings (
   id TEXT PRIMARY KEY,
   accessToken TEXT,
   shop TEXT,
+  config JSONB DEFAULT '{}'::jsonb,
   connectedAt TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 3. ADD CONFIG COLUMN IF MISSING (Fixes "column config does not exist" error)
+-- 3. Ensure "config" column exists (for backward compatibility if table existed)
 DO $$ 
 BEGIN 
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='settings' AND column_name='config') THEN
-        ALTER TABLE settings ADD COLUMN config JSONB;
+        ALTER TABLE settings ADD COLUMN config JSONB DEFAULT '{}'::jsonb;
     END IF;
 END $$;
 
@@ -56,15 +82,16 @@ BEGIN
 END $$;
 
 -- 6. Insert Your Secrets (Template)
--- IMPORTANT: GitHub might block your push if you commit real keys. 
--- Replace placeholder values in your Supabase SQL editor directly.
+-- Copy this block, replace the values, and run it in Supabase SQL Editor
 /*
 INSERT INTO settings (id, config)
 VALUES ('secrets', '{
-  "GEMINI_API_KEY": "YOUR_KEY",
-  "SHOPIFY_CLIENT_ID": "YOUR_ID",
-  "SHOPIFY_CLIENT_SECRET": "YOUR_SECRET",
+  "GEMINI_API_KEY": "YOUR_GEMINI_KEY",
+  "SHOPIFY_CLIENT_ID": "YOUR_SHOPIFY_ID",
+  "SHOPIFY_CLIENT_SECRET": "YOUR_SHOPIFY_SECRET",
   "SHOPIFY_SHOP_DOMAIN": "your-store-handle",
+  "META_ADS_ACCESS_TOKEN": "YOUR_META_TOKEN",
+  "META_AD_ACCOUNT_ID": "act_YOUR_ACCOUNT_ID",
   "APP_URL": "https://your-app.netlify.app"
 }')
 ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config;

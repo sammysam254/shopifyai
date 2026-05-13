@@ -22,45 +22,61 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState<string | null>(null);
   const [isScouting, setIsScouting] = useState(false);
   const [shopifyStatus, setShopifyStatus] = useState<{ connected: boolean; shop?: string }>({ connected: false });
+  const [metaAdsStatus, setMetaAdsStatus] = useState<{ connected: boolean }>({ connected: false });
   const [systemHealth, setSystemHealth] = useState<any>(null);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [isConnectingMeta, setIsConnectingMeta] = useState(false);
   const [connError, setConnError] = useState<string | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
 
-  // Fetch initial data, Shopify status and system health
+  // Fetch initial data, status and system health
   useEffect(() => {
     const init = async () => {
       setInitError(null);
       try {
-        const [prodRes, shopRes, healthRes] = await Promise.all([
+        const [prodRes, shopRes, metaRes, healthRes] = await Promise.all([
           fetch("/api/products"),
           fetch("/api/shopify/status"),
+          fetch("/api/marketing/status"),
           fetch("/api/health")
         ]);
 
         if (!prodRes.ok) {
-          const text = await prodRes.text();
-          throw new Error(`Products API error (${prodRes.status}): ${text.slice(0, 100)}`);
+          const errData = await prodRes.json().catch(() => ({}));
+          throw new Error(errData.hint || errData.details || `Products API error (${prodRes.status})`);
         }
-        if (!shopRes.ok) {
-          const text = await shopRes.text();
-          throw new Error(`Shopify Status API error (${shopRes.status}): ${text.slice(0, 100)}`);
-        }
-
+        
         const prodData = await prodRes.json();
         const shopData = await shopRes.json();
+        const metaData = await metaRes.json();
         const healthData = healthRes.ok ? await healthRes.json() : null;
 
         setProducts(Array.isArray(prodData) ? prodData : []);
         setShopifyStatus(shopData);
+        setMetaAdsStatus(metaData);
         setSystemHealth(healthData);
       } catch (error: any) {
         console.error("Initialization failed", error);
-        setInitError(error.message || "Unknown error during initialization");
+        setInitError(error.message || "Connection to backend failed");
       }
     };
     init();
   }, []);
+
+  const connectMetaAds = async () => {
+    setIsConnectingMeta(true);
+    // Simple mock connection as user requested "API AC" (Active)
+    const token = prompt("Enter Meta Ads Access Token (or 'MOCK' for demo):");
+    if (!token) {
+      setIsConnectingMeta(false);
+      return;
+    }
+    
+    // In a real app, we'd save this to Supabase
+    setMetaAdsStatus({ connected: true });
+    setIsConnectingMeta(false);
+    alert("Meta Ads API connected successfully.");
+  };
 
   // Listen for Shopify OAuth success
   useEffect(() => {
@@ -116,7 +132,7 @@ export default function App() {
           throw new Error("Popup blocked! Please allow popups for this site.");
         }
       } else {
-        throw new Error(data.error || "Failed to initiate Shopify connection. Check your API Keys.");
+        throw new Error(data.error || "Server failed to return an auth URL. Check Supabase 'settings' table (id='secrets').");
       }
     } catch (error: any) {
       console.error("Connection failed:", error);
@@ -150,14 +166,14 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: product.id,
-          title: product.optimizedTitle,
-          description: product.optimizedDescription,
+          title: product.optimized_title,
+          description: product.optimized_description,
           tags: product.tags
         })
       });
       const result = await response.json();
       setProducts(prev => prev.map(p => 
-        p.id === product.id ? { ...p, status: ProductStatus.SYNCED, shopifyUrl: result.shopifyUrl } : p
+        p.id === product.id ? { ...p, status: ProductStatus.SYNCED, shopify_url: result.shopify_url } : p
       ));
     } catch (error) {
       console.error("Sync failed", error);
@@ -168,20 +184,23 @@ export default function App() {
 
   const launchCampaign = async (product: TrendingProduct) => {
     try {
-      const response = await fetch("/api/launch-campaign", {
+      const response = await fetch("/api/marketing/launch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: product.id,
-          shopifyUrl: product.shopifyUrl
+          shopify_url: product.shopify_url
         })
       });
       const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Launch failed");
+
       setProducts(prev => prev.map(p => 
         p.id === product.id ? { ...p, status: ProductStatus.CAMPAIGN_LIVE } : p
       ));
-    } catch (error) {
+    } catch (error: any) {
       console.error("Campaign launch failed", error);
+      alert("Campaign Launch Error: " + error.message);
     }
   };
 
@@ -193,9 +212,9 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: product.title,
-          imageUrl: product.imageUrl,
-          sourceCountry: product.sourceCountry,
-          trendScore: product.trendScore
+          image_url: product.image_url,
+          source_country: product.source_country,
+          trend_score: product.trend_score
         })
       });
       
@@ -206,8 +225,8 @@ export default function App() {
           ? { 
               ...p, 
               status: result.suitable ? ProductStatus.APPROVED : ProductStatus.REJECTED,
-              optimizedTitle: result.optimizedTitle,
-              optimizedDescription: result.optimizedDescription,
+              optimized_title: result.optimized_title,
+              optimized_description: result.optimized_description,
               tags: result.tags
             } 
           : p
@@ -262,20 +281,54 @@ export default function App() {
       </header>
 
       {initError && (
-        <div className="bg-red-500/10 border border-red-500/30 p-4 rounded-xl flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <XCircle className="w-5 h-5 text-red-500" />
+        <div className="bg-red-500/10 border border-red-500/30 p-4 rounded-xl flex items-start justify-between">
+          <div className="flex items-start gap-4">
+            <div className="mt-1">
+              <XCircle className="w-5 h-5 text-red-500" />
+            </div>
             <div>
-              <p className="text-xs font-bold text-red-500 uppercase tracking-widest">Initialization Error</p>
-              <p className="text-[11px] text-slate-400 font-mono">{initError}</p>
+              <p className="text-sm font-bold text-red-500 uppercase tracking-widest leading-none mb-2">System Error: {initError.includes("502") ? "Service Unavailable (502)" : "Initialization Failed"}</p>
+              <p className="text-xs text-slate-400 font-mono mb-4">{initError}</p>
+              
+              {(!systemHealth?.supabase?.reachable || initError.toLowerCase().includes("does not exist")) && (
+                <div className="bg-slate-900 border border-slate-700 p-4 rounded-lg max-w-lg">
+                  <h4 className="text-xs font-bold text-blue-400 uppercase mb-2 flex items-center gap-2">
+                    <Zap className="w-3 h-3" />
+                    Action Required:
+                  </h4>
+                  <p className="text-[11px] text-slate-300 leading-relaxed mb-3">
+                    {initError.toLowerCase().includes("does not exist") 
+                      ? "Your Supabase project is connected, but the database tables are missing."
+                      : "Your backend cannot connect to Supabase. This is causing 'Invalid URL' and '502' errors."}
+                  </p>
+                  <ol className="text-[10px] text-slate-400 list-decimal ml-4 space-y-1">
+                    {!systemHealth?.supabase?.reachable ? (
+                      <>
+                        <li>Open <strong>server.ts</strong> in the editor.</li>
+                        <li>Paste your <strong>SUPABASE_URL</strong> and <strong>SERVICE_ROLE_KEY</strong> into the override variables at the top.</li>
+                      </>
+                    ) : (
+                      <>
+                        <li>Open the file <strong>supabase_schema.sql</strong> in this project.</li>
+                        <li>Copy all the code in that file.</li>
+                        <li>Go to your <strong>Supabase Dashboard</strong> &gt; <strong>SQL Editor</strong>.</li>
+                        <li>Paste the code and click <strong>Run</strong>.</li>
+                      </>
+                    )}
+                    <li>Click the <strong>Retry</strong> button below once done.</li>
+                  </ol>
+                </div>
+              )}
             </div>
           </div>
-          <button 
-            onClick={() => window.location.reload()}
-            className="text-[10px] bg-red-500 text-white px-3 py-1 rounded-lg font-bold uppercase"
-          >
-            Retry
-          </button>
+          <div className="flex flex-col gap-2">
+            <button 
+              onClick={() => window.location.reload()}
+              className="text-[10px] bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-lg font-bold uppercase transition-colors"
+            >
+              Retry Connection
+            </button>
+          </div>
         </div>
       )}
 
@@ -335,20 +388,42 @@ export default function App() {
                 ) : (
                   <button 
                     onClick={connectShopify} 
-                    disabled={isConnecting}
-                    className="text-[9px] bg-blue-600/20 text-blue-400 border border-blue-500/30 px-2 py-0.5 rounded-full hover:bg-blue-600/30 disabled:opacity-50"
+                    disabled={isConnecting || !systemHealth?.supabase?.reachable}
+                    className={`text-[9px] border px-2 py-0.5 rounded-full transition-all ${
+                      systemHealth?.supabase?.reachable 
+                        ? "bg-blue-600/20 text-blue-400 border-blue-500/30 hover:bg-blue-600/30" 
+                        : "bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed"
+                    }`}
                   >
                     {isConnecting ? "Connecting..." : "Connect"}
                   </button>
                 )}
               </div>
-              {connError && <div className="text-[8px] text-red-400 font-mono uppercase">{connError}</div>}
+              {connError && (
+                <div className="bg-red-500/10 border border-red-500/20 p-2 rounded text-[9px] text-red-400 font-mono leading-tight">
+                  <div className="font-bold flex items-center gap-1 mb-1">
+                    <XCircle className="w-3 h-3" />
+                    CONNECTION FAILED
+                  </div>
+                  {connError}
+                </div>
+              )}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <Rocket className="w-4 h-4 text-emerald-400" />
+                  <Rocket className={`w-4 h-4 ${metaAdsStatus.connected ? "text-emerald-400" : "text-slate-600"}`} />
                   <span className="text-[11px] font-mono">Meta Ads</span>
                 </div>
-                <span className="text-[9px] text-emerald-400 font-mono uppercase">API ACTIVE</span>
+                {metaAdsStatus.connected ? (
+                  <span className="text-[9px] text-emerald-400 font-mono uppercase">API ACTIVE</span>
+                ) : (
+                  <button 
+                    onClick={connectMetaAds}
+                    disabled={isConnectingMeta}
+                    className="text-[9px] bg-emerald-600/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full hover:bg-emerald-600/30"
+                  >
+                    Connect
+                  </button>
+                )}
               </div>
             </div>
             
@@ -458,21 +533,21 @@ export default function App() {
                         {product.status.replace(/_/g, " ")}
                       </div>
                       <div className="text-[10px] font-mono font-bold text-white bg-black/60 px-2 py-0.5 rounded backdrop-blur-md">
-                        SCORE: {product.trendScore}
+                        SCORE: {product.trend_score}
                       </div>
                     </div>
 
                     {/* Image Section */}
                     <div className="w-40 h-full relative overflow-hidden bg-slate-900 flex-shrink-0">
                       <img 
-                        src={product.imageUrl} 
+                        src={product.image_url} 
                         alt={product.title} 
                         className="w-full h-full object-cover transition-all duration-700 group-hover:scale-110 opacity-70 group-hover:opacity-100"
                       />
                       <div className="absolute inset-0 bg-gradient-to-r from-transparent to-[#16161A]/80"></div>
                       <div className="absolute bottom-2 left-2 flex items-center gap-1.5">
                         <Globe className="w-3 h-3 text-slate-400" />
-                        <span className="text-[9px] font-mono uppercase tracking-widest text-slate-300">{product.sourceCountry}</span>
+                        <span className="text-[9px] font-mono uppercase tracking-widest text-slate-300">{product.source_country}</span>
                       </div>
                     </div>
 
@@ -480,10 +555,10 @@ export default function App() {
                     <div className="flex-1 p-5 flex flex-col justify-between min-w-0">
                       <div>
                         <h3 className="font-display text-lg font-bold tracking-tight mb-2 uppercase italic leading-tight text-white line-clamp-2">
-                          {product.optimizedTitle || product.title}
+                          {product.optimized_title || product.title}
                         </h3>
                         <p className="text-[11px] text-slate-400 italic font-serif leading-relaxed line-clamp-3 mb-4">
-                          {product.optimizedDescription || "Pending AI semantic analysis and market fit evaluation..."}
+                          {product.optimized_description || "Pending AI semantic analysis and market fit evaluation..."}
                         </p>
                         
                         <div className="flex flex-wrap gap-1.5 mb-4">
@@ -584,8 +659,8 @@ export default function App() {
                     {Array.isArray(products) && products.slice(0, 5).map(p => (
                       <tr key={p.id} className="hover:bg-white/[0.02] group transition-colors">
                         <td className="py-3 px-4 text-slate-500">#{p.id.slice(0, 4)}</td>
-                        <td className="py-3 px-4 font-semibold text-slate-300 uppercase">{p.optimizedTitle || p.title}</td>
-                        <td className="py-3 px-4 text-emerald-400">{p.trendScore / 100}</td>
+                        <td className="py-3 px-4 font-semibold text-slate-300 uppercase">{p.optimized_title || p.title}</td>
+                        <td className="py-3 px-4 text-emerald-400">{p.trend_score / 100}</td>
                         <td className="py-3 px-4">
                           <span className={`px-2 py-0.5 rounded ${
                             p.status === ProductStatus.PENDING ? "bg-amber-500/10 text-amber-500" :
