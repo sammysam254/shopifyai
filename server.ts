@@ -1,6 +1,5 @@
 import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
@@ -562,6 +561,8 @@ export const handler = serverless(app);
 // Local server setup
 if (process.env.NODE_ENV !== "production" && !process.env.NETLIFY) {
   const startLocalServer = async () => {
+    // Dynamic import so Vite is never bundled into the Netlify function
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",

@@ -6,5 +6,3 @@ coverage/
 *.log
 .env*
 !.env.example
-netlify/functions/server.js
-netlify/functions/server.js.map
