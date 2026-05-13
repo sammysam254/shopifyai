@@ -21,7 +21,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ProductStatus | "all">("all");
   const [isSyncing, setIsSyncing] = useState<string | null>(null);
   const [isScouting, setIsScouting] = useState(false);
-  const [shopifyStatus, setShopifyStatus] = useState<{connected: boolean, shop?: string}>({ connected: false });
+  const [shopifyStatus, setShopifyStatus] = useState<{ connected: boolean; shop?: string }>({ connected: false });
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [connError, setConnError] = useState<string | null>(null);
 
   // Fetch initial data and Shopify status
   useEffect(() => {
@@ -50,6 +52,7 @@ export default function App() {
           const res = await fetch("/api/shopify/status");
           const data = await res.json();
           setShopifyStatus(data);
+          setIsConnecting(false);
         };
         checkStatus();
       }
@@ -59,15 +62,37 @@ export default function App() {
   }, []);
 
   const connectShopify = async () => {
-    const shop = prompt("Enter your Shopify store name (e.g., 'your-store'):");
-    if (!shop) return;
+    setIsConnecting(true);
+    setConnError(null);
 
     try {
+      // 1. Try automatic connect (checks if SHOPIFY_SHOP_DOMAIN is set on server)
+      const autoRes = await fetch("/api/shopify/auth");
+      const autoData = await autoRes.json();
+
+      if (autoRes.ok && autoData.url) {
+        window.open(autoData.url, 'shopify_oauth', 'width=600,height=700');
+        return;
+      }
+
+      // 2. If automatic fails, prompt user
+      const shop = prompt("Enter your Shopify store name (e.g., 'your-store'):");
+      if (!shop) {
+        setIsConnecting(false);
+        return;
+      }
+
       const response = await fetch(`/api/shopify/auth?shop=${shop}`);
-      const { url } = await response.json();
-      window.open(url, 'shopify_oauth', 'width=600,height=700');
-    } catch (error) {
-      console.error("Failed to get auth URL", error);
+      const data = await response.json();
+      if (data.url) {
+        window.open(data.url, 'shopify_oauth', 'width=600,height=700');
+      } else {
+        throw new Error(data.error || "Authentication initiation failed");
+      }
+    } catch (error: any) {
+      console.error("Failed to connect", error);
+      setConnError(error.message || "Failed to connect to Shopify");
+      setIsConnecting(false);
     }
   };
 
@@ -251,11 +276,18 @@ export default function App() {
                   <span className="text-[11px] font-mono">Shopify</span>
                 </div>
                 {shopifyStatus.connected ? (
-                  <span className="text-[9px] text-emerald-400 font-mono uppercase">Connected: {shopifyStatus.shop}</span>
+                  <span className="text-[9px] text-emerald-400 font-mono uppercase truncate max-w-[120px]" title={shopifyStatus.shop}>OK: {shopifyStatus.shop}</span>
                 ) : (
-                  <button onClick={connectShopify} className="text-[9px] bg-blue-600/20 text-blue-400 border border-blue-500/30 px-2 py-0.5 rounded-full hover:bg-blue-600/30">Connect</button>
+                  <button 
+                    onClick={connectShopify} 
+                    disabled={isConnecting}
+                    className="text-[9px] bg-blue-600/20 text-blue-400 border border-blue-500/30 px-2 py-0.5 rounded-full hover:bg-blue-600/30 disabled:opacity-50"
+                  >
+                    {isConnecting ? "Connecting..." : "Connect"}
+                  </button>
                 )}
               </div>
+              {connError && <div className="text-[8px] text-red-400 font-mono uppercase">{connError}</div>}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Rocket className="w-4 h-4 text-emerald-400" />
