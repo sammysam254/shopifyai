@@ -266,21 +266,66 @@ app.get("/api/scout-trends", async (_req, res) => {
   try {
     const ai = await getAi();
     const model = ai.getGenerativeModel({ model: "gemini-1.5-flash" });
-    const prompt = `Return a JSON array of 3 trending consumer products for ${new Date().toLocaleString("en", { month: "long", year: "numeric" })}.
-Each object must exactly match: {"title":"Product Name","source_country":"USA","trend_score":95,"image_url":"https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=800"}
-Output only the raw JSON array. No markdown, no extra text.`;
+    const prompt = `Return a JSON array of exactly 5 trending consumer products that are popular right now for dropshipping to North America.
+Each object must have exactly these fields:
+{"title":"Product Name","source_country":"China","trend_score":92,"image_url":"https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=800"}
+Rules:
+- trend_score must be a number between 70 and 99
+- source_country must be a string like "China", "USA", "Korea"
+- image_url must be a real Unsplash URL
+- Output ONLY the raw JSON array. No markdown, no code blocks, no extra text.`;
+
     const result = await model.generateContent(prompt);
-    const generatedTrends = JSON.parse(result.response.text().replace(/```json|```/g, "").trim());
+    const rawText = result.response.text();
+    
+    // Strip any markdown code fences
+    const cleanedText = rawText
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/```\s*$/i, "")
+      .trim();
+
+    let generatedTrends: any[];
+    try {
+      generatedTrends = JSON.parse(cleanedText);
+    } catch (parseErr) {
+      console.error("[Scout] JSON parse failed. Raw response:", rawText);
+      return res.status(500).json({ error: "Gemini returned invalid JSON", raw: rawText.substring(0, 300) });
+    }
+
+    if (!Array.isArray(generatedTrends)) {
+      return res.status(500).json({ error: "Gemini response was not an array", raw: cleanedText.substring(0, 300) });
+    }
+
     const savedProducts = [];
     for (const trend of generatedTrends) {
-      const { data, error } = await supabase.from("trending_products").insert({ ...trend, status: "pending_review", created_at: new Date().toISOString() }).select().single();
-      if (error) { console.error("Supabase Insert Error:", error); continue; }
+      // Ensure required fields exist
+      const product = {
+        title: trend.title || "Unnamed Product",
+        source_country: trend.source_country || "Unknown",
+        trend_score: Number(trend.trend_score) || 80,
+        image_url: trend.image_url || "https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=800",
+        status: "pending_review",
+        created_at: new Date().toISOString()
+      };
+
+      const { data, error } = await supabase
+        .from("trending_products")
+        .insert(product)
+        .select()
+        .single();
+
+      if (error) {
+        console.error("[Scout] Supabase insert error:", error.message, "Code:", error.code);
+        continue;
+      }
       if (data) savedProducts.push(data);
     }
+
     res.json({ processed: generatedTrends.length, saved: savedProducts.length, items: savedProducts });
-  } catch (error) {
-    console.error("Scout Error:", error);
-    res.status(500).json({ error: "Failed to scout trends" });
+  } catch (error: any) {
+    console.error("[Scout] Exception:", error?.message || error);
+    res.status(500).json({ error: "Failed to scout trends", details: error?.message });
   }
 });
 
