@@ -1,5 +1,8 @@
+-- SQL Schema for Trending Products App
+-- Paste this into the Supabase SQL Editor
+
 -- 1. Create Trending Products Table
-CREATE TABLE trending_products (
+CREATE TABLE IF NOT EXISTS trending_products (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title TEXT NOT NULL,
   imageUrl TEXT,
@@ -11,23 +14,58 @@ CREATE TABLE trending_products (
   tags TEXT[],
   shopifyUrl TEXT,
   syncedAt TIMESTAMPTZ,
-  createdAt TIMESTAMPTZ DEFAULT now(),
+  createdAt TIMESTAMPTZ DEFAULT NOW(),
   ownerId TEXT DEFAULT 'system'
 );
 
--- 2. Create Settings Table (for Shopify OAuth)
-CREATE TABLE settings (
-  id TEXT PRIMARY KEY, -- 'shopify'
+-- 2. Create Settings Table
+CREATE TABLE IF NOT EXISTS settings (
+  id TEXT PRIMARY KEY,
   accessToken TEXT,
   shop TEXT,
-  config JSONB DEFAULT '{}'::jsonb,
-  connectedAt TIMESTAMPTZ DEFAULT now()
+  connectedAt TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 3. Enable RLS (Optional - for simple use you can keep it disabled or add basic policies)
--- ALTER TABLE trending_products ENABLE ROW LEVEL SECURITY;
--- ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
+-- 3. ADD CONFIG COLUMN IF MISSING (Fixes "column config does not exist" error)
+DO $$ 
+BEGIN 
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='settings' AND column_name='config') THEN
+        ALTER TABLE settings ADD COLUMN config JSONB;
+    END IF;
+END $$;
 
--- Simple policy: Allow all access for now (Harden this later if needed)
--- CREATE POLICY "public_access" ON trending_products FOR ALL USING (true);
--- CREATE POLICY "public_access" ON settings FOR ALL USING (true);
+-- 4. Enable RLS
+ALTER TABLE trending_products ENABLE ROW LEVEL SECURITY;
+ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
+
+-- 5. Create Policies
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'Public Read Trending Products') THEN
+        CREATE POLICY "Public Read Trending Products" ON trending_products FOR SELECT USING (true);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'Public Read Settings') THEN
+        CREATE POLICY "Public Read Settings" ON settings FOR SELECT USING (true);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'Service Role Full Access') THEN
+        CREATE POLICY "Service Role Full Access" ON trending_products FOR ALL USING (true);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'Service Role Full Access Settings') THEN
+        CREATE POLICY "Service Role Full Access Settings" ON settings FOR ALL USING (true);
+    END IF;
+END $$;
+
+-- 6. Insert Your Secrets (Template)
+-- IMPORTANT: GitHub might block your push if you commit real keys. 
+-- Replace placeholder values in your Supabase SQL editor directly.
+/*
+INSERT INTO settings (id, config)
+VALUES ('secrets', '{
+  "GEMINI_API_KEY": "YOUR_KEY",
+  "SHOPIFY_CLIENT_ID": "YOUR_ID",
+  "SHOPIFY_CLIENT_SECRET": "YOUR_SECRET",
+  "SHOPIFY_SHOP_DOMAIN": "your-store-handle",
+  "APP_URL": "https://your-app.netlify.app"
+}')
+ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config;
+*/

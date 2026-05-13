@@ -22,18 +22,20 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState<string | null>(null);
   const [isScouting, setIsScouting] = useState(false);
   const [shopifyStatus, setShopifyStatus] = useState<{ connected: boolean; shop?: string }>({ connected: false });
+  const [systemHealth, setSystemHealth] = useState<any>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [connError, setConnError] = useState<string | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
 
-  // Fetch initial data and Shopify status
+  // Fetch initial data, Shopify status and system health
   useEffect(() => {
     const init = async () => {
       setInitError(null);
       try {
-        const [prodRes, shopRes] = await Promise.all([
+        const [prodRes, shopRes, healthRes] = await Promise.all([
           fetch("/api/products"),
-          fetch("/api/shopify/status")
+          fetch("/api/shopify/status"),
+          fetch("/api/health")
         ]);
 
         if (!prodRes.ok) {
@@ -47,8 +49,11 @@ export default function App() {
 
         const prodData = await prodRes.json();
         const shopData = await shopRes.json();
+        const healthData = healthRes.ok ? await healthRes.json() : null;
+
         setProducts(Array.isArray(prodData) ? prodData : []);
         setShopifyStatus(shopData);
+        setSystemHealth(healthData);
       } catch (error: any) {
         console.error("Initialization failed", error);
         setInitError(error.message || "Unknown error during initialization");
@@ -79,33 +84,42 @@ export default function App() {
     setConnError(null);
 
     try {
-      // 1. Try automatic connect (checks if SHOPIFY_SHOP_DOMAIN is set on server)
-      const autoRes = await fetch("/api/shopify/auth");
-      
-      if (autoRes.ok) {
-        const autoData = await autoRes.json();
-        if (autoData.url) {
-          window.open(autoData.url, 'shopify_oauth', 'width=600,height=700');
+      // 1. Try initiation (The server will check for shop domain in secrets or query)
+      const response = await fetch("/api/shopify/auth");
+      let data = await response.json();
+
+      // 2. If it failed because of missing shop, ask user
+      if (response.status === 400 && data.error?.includes("Shop domain missing")) {
+        const shopHandle = prompt("Enter your Shopify Store Handle (e.g. 'vertext-market'):");
+        if (!shopHandle) {
+          setIsConnecting(false);
           return;
         }
+        const retryRes = await fetch(`/api/shopify/auth?shop=${shopHandle}`);
+        data = await retryRes.json();
       }
 
-      // 2. If automatic fails, prompt user
-      const shop = prompt("Enter your Shopify store name (e.g., 'your-store'):");
-      if (!shop) {
-        setIsConnecting(false);
-        return;
-      }
-
-      const response = await fetch(`/api/shopify/auth?shop=${shop}`);
-      const data = await response.json();
       if (data.url) {
-        window.open(data.url, 'shopify_oauth', 'width=600,height=700');
+        // Open the popup
+        const width = 600;
+        const height = 800;
+        const left = window.screenX + (window.outerWidth - width) / 2;
+        const top = window.screenY + (window.outerHeight - height) / 2;
+        
+        const popup = window.open(
+          data.url, 
+          'shopify_oauth', 
+          `width=${width},height=${height},left=${left},top=${top},status=no,directories=no,location=no,menubar=no,toolbar=no`
+        );
+        
+        if (!popup || popup.closed || typeof popup.closed === 'undefined') {
+          throw new Error("Popup blocked! Please allow popups for this site.");
+        }
       } else {
-        throw new Error(data.error || "Authentication initiation failed");
+        throw new Error(data.error || "Failed to initiate Shopify connection. Check your API Keys.");
       }
     } catch (error: any) {
-      console.error("Failed to connect", error);
+      console.error("Connection failed:", error);
       setConnError(error.message || "Failed to connect to Shopify");
       setIsConnecting(false);
     }
@@ -224,12 +238,16 @@ export default function App() {
         
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2 bg-slate-900 px-3 py-1 rounded-full border border-slate-700">
-            <div className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]"></div>
-            <span className="text-[10px] font-mono uppercase tracking-wider">Supabase: Online</span>
+            <div className={`w-2 h-2 rounded-full ${systemHealth?.supabase?.reachable ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]" : "bg-red-500 animate-pulse"}`}></div>
+            <span className="text-[10px] font-mono uppercase tracking-wider">
+              Supabase: {systemHealth?.supabase?.reachable ? "Online" : "Offline/Error"}
+            </span>
           </div>
           <div className="flex items-center gap-2 bg-slate-900 px-3 py-1 rounded-full border border-slate-700">
-            <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.6)]"></div>
-            <span className="text-[10px] font-mono uppercase tracking-wider">Gemini 1.5 Flash</span>
+            <div className={`w-2 h-2 rounded-full ${systemHealth?.secrets?.gemini ? "bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.6)]" : "bg-red-500 animate-pulse"}`}></div>
+            <span className="text-[10px] font-mono uppercase tracking-wider">
+              Gemini: {systemHealth?.secrets?.gemini ? "Active" : "Keys Missing"}
+            </span>
           </div>
           
           <button 

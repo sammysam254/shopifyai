@@ -14,6 +14,11 @@ app.use(express.json());
 // Initialize Supabase Admin (Service Role)
 const supabaseUrl = process.env.SUPABASE_URL || "";
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+
+if (!supabaseUrl || !supabaseServiceKey) {
+  console.error("CRITICAL: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing from environment variables.");
+}
+
 const supabase = createClient(supabaseUrl, supabaseServiceKey, {
   auth: {
     autoRefreshToken: false,
@@ -52,6 +57,14 @@ async function getConfig() {
     }
   }
 
+  // Sanitize SHOPIFY_SHOP_DOMAIN (extract handle from URL if needed)
+  if (config.SHOPIFY_SHOP_DOMAIN) {
+    config.SHOPIFY_SHOP_DOMAIN = config.SHOPIFY_SHOP_DOMAIN
+      .replace(/^https?:\/\//, "")
+      .replace(/\.myshopify\.com\/?$/, "")
+      .replace(/\/$/, "");
+  }
+
   return config;
 }
 
@@ -69,11 +82,34 @@ async function getAi() {
 }
 
 // API Routes
-app.get("/api/health", (req, res) => {
+app.get("/api/health", async (req, res) => {
+  const supabaseOk = !!supabaseUrl && !!supabaseServiceKey;
+  let supabaseDataOk = false;
+  
+  if (supabaseOk) {
+    try {
+      const { count, error } = await supabase.from("settings").select("*", { count: "exact", head: true });
+      supabaseDataOk = !error;
+    } catch (e) {
+      supabaseDataOk = false;
+    }
+  }
+
+  const config = await getConfig();
+
   res.json({ 
     status: "ok", 
     environment: process.env.NODE_ENV,
-    secretsLoaded: !!process.env.GEMINI_API_KEY || "checking_supabase"
+    supabase: {
+      configured: supabaseOk,
+      reachable: supabaseDataOk,
+      url: supabaseUrl ? `${supabaseUrl.substring(0, 12)}...` : "missing"
+    },
+    secrets: {
+      gemini: !!config.GEMINI_API_KEY,
+      shopify: !!config.SHOPIFY_CLIENT_ID,
+      appUrl: config.APP_URL || "using_request_host"
+    }
   });
 });
 
@@ -199,30 +235,35 @@ app.get("/api/shopify/status", async (req, res) => {
 // Ingest Trends
 app.get("/api/scout-trends", async (req, res) => {
   try {
-    const rawTrends = [
+    const ai = await getAi();
+    const model = ai.getGenerativeModel({ model: "gemini-1.5-flash" });
+    
+    const prompt = `
+      Return a JSON array of 3 trending consumer products for May 2024. 
+      Each object must exactly match this structure:
       {
-        title: "Biodegradable Coffee Pods",
-        imageUrl: "https://images.unsplash.com/photo-1559056199-641a0ac8b55e?w=800",
-        sourceCountry: "UK",
-        trendScore: 92,
-        status: "pending_review",
-        createdAt: new Date().toISOString()
-      },
-      {
-        title: "Self-Cleaning Yoga Mat",
-        imageUrl: "https://images.unsplash.com/photo-1544367567-0f2fcb009e0b?w=800",
-        sourceCountry: "USA",
-        trendScore: 85,
-        status: "pending_review",
-        createdAt: new Date().toISOString()
+        "title": "Product Name",
+        "sourceCountry": "USA",
+        "trendScore": 95,
+        "imageUrl": "https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=800"
       }
-    ];
+      Output only the raw JSON array. No markdown, no extra text.
+    `;
+
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+    const cleanedText = text.replace(/```json|```/g, "").trim();
+    const generatedTrends = JSON.parse(cleanedText);
 
     const savedProducts = [];
-    for (const trend of rawTrends) {
+    for (const trend of generatedTrends) {
       const { data, error } = await supabase
         .from("trending_products")
-        .insert(trend)
+        .insert({
+          ...trend,
+          status: "pending_review",
+          createdAt: new Date().toISOString()
+        })
         .select()
         .single();
       
@@ -233,8 +274,9 @@ app.get("/api/scout-trends", async (req, res) => {
       if (data) savedProducts.push(data);
     }
 
-    res.json({ processed: rawTrends.length, saved: savedProducts.length, items: savedProducts });
+    res.json({ processed: generatedTrends.length, saved: savedProducts.length, items: savedProducts });
   } catch (error) {
+    console.error("Scout Error:", error);
     res.status(500).json({ error: "Failed to scout trends" });
   }
 });
@@ -242,25 +284,66 @@ app.get("/api/scout-trends", async (req, res) => {
   // Shopify OAuth Integration
   app.get("/api/shopify/auth", async (req, res) => {
     const config = await getConfig();
-    const shop = req.query.shop || config.SHOPIFY_SHOP_DOMAIN;
+    let shop = (req.query.shop as string) || config.SHOPIFY_SHOP_DOMAIN;
     
+    if (shop) {
+      // Force clean handle: "my-store.myshopify.com" -> "my-store"
+      shop = shop.replace(/^https?:\/\//, "")
+                 .replace(/\.myshopify\.com\/?$/, "")
+                 .split("/")[0]
+                 .trim();
+    }
+
     if (!shop) {
       return res.status(400).json({ 
-        error: "Shop domain is required. Please provide a shop query parameter or set SHOPIFY_SHOP_DOMAIN in secrets." 
+        error: "Shop domain missing. Set SHOPIFY_SHOP_DOMAIN in Supabase secrets (id='secrets') or provide ?shop=" 
       });
     }
 
     const client_id = config.SHOPIFY_CLIENT_ID;
     const scopes = "read_products,write_products";
-    const redirect_uri = `${config.APP_URL || process.env.APP_URL}/api/shopify/callback`;
     
+    // SMART REDIRECT: Use current request host if we are in a dev/preview environment
+    const host = req.headers["host"];
+    const protocol = req.headers["x-forwarded-proto"] || "https";
+    let redirectBase = `${protocol}://${host}`;
+    
+    // Only use hardcoded APP_URL if we are not on a preview/dev domain
+    if (config.APP_URL && !host?.includes("run.app") && !host?.includes("localhost")) {
+      redirectBase = config.APP_URL.replace(/\/$/, "");
+    }
+    
+    const redirect_uri = `${redirectBase}/api/shopify/callback`;
+    
+    console.log(`[Shopify Auth] Store: ${shop}, ClientID: ${client_id ? "SET" : "MISSING"}, Redirect: ${redirect_uri}`);
+
     if (!client_id) {
-      return res.status(500).json({ error: "SHOPIFY_CLIENT_ID (API Key) is not configured. Add it to environment or Supabase secrets." });
+      return res.status(500).json({ 
+        error: "SHOPIFY_CLIENT_ID (API Key) is missing. Ensure your Supabase 'settings' table has a row with id 'secrets' and a valid JSON config." 
+      });
     }
 
     const authUrl = `https://${shop}.myshopify.com/admin/oauth/authorize?client_id=${client_id}&scope=${scopes}&redirect_uri=${redirect_uri}`;
     
     res.json({ url: authUrl });
+  });
+
+  // Debug Endpoint to verify secrets
+  app.get("/api/debug-config", async (req, res) => {
+    const config = await getConfig();
+    res.json({
+      supabase: {
+        url: !!supabaseUrl,
+        key: !!supabaseServiceKey,
+      },
+      secrets: {
+        gemini: !!config.GEMINI_API_KEY,
+        shopify_id: !!config.SHOPIFY_CLIENT_ID,
+        shopify_secret: !!config.SHOPIFY_CLIENT_SECRET,
+        shop_domain: config.SHOPIFY_SHOP_DOMAIN || "NOT_SET",
+        app_url: config.APP_URL || "NOT_SET"
+      }
+    });
   });
 
   app.get("/api/shopify/callback", async (req, res) => {
@@ -271,8 +354,10 @@ app.get("/api/scout-trends", async (req, res) => {
       return res.status(400).send("Missing shop or code");
     }
 
+    const fullShop = (shop as string).includes(".") ? shop : `${shop}.myshopify.com`;
+
     try {
-      const response = await fetch(`https://${shop}/admin/oauth/access_token`, {
+      const response = await fetch(`https://${fullShop}/admin/oauth/access_token`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -286,7 +371,7 @@ app.get("/api/scout-trends", async (req, res) => {
       
       if (data.access_token) {
         // Fetch real shop name/info using the token
-        const shopInfoRes = await fetch(`https://${shop}/admin/api/2024-01/shop.json`, {
+        const shopInfoRes = await fetch(`https://${fullShop}/admin/api/2024-01/shop.json`, {
           headers: { "X-Shopify-Access-Token": data.access_token }
         });
         const shopInfo: any = await shopInfoRes.json();
