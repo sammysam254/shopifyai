@@ -1,6 +1,16 @@
 [build]
-  command = "npm run build"
+  # Only build the frontend. The Netlify function (server.js) is pre-built
+  # and committed to the repo — Netlify must NOT re-bundle it.
+  command = "npx vite build"
   publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[functions]
+  directory = "netlify/functions"
+  # Pre-bundled by esbuild — tell Netlify to use it as-is
+  node_bundler = "none"
 
 [dev]
   command = "npm run dev"
