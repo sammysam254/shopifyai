@@ -5,21 +5,14 @@
 [build.environment]
   NODE_VERSION = "20"
 
-# Runtime environment variables — available to Netlify Functions at request time.
-# These are the only 3 values needed to bootstrap the app.
-# All other secrets (Gemini, Shopify, Meta) live in Supabase vault and are
-# fetched at runtime via the secrets-proxy edge function.
 [functions]
   directory = "netlify/functions"
-  node_bundler = "esbuild"
+  # The function is pre-bundled by esbuild during build — tell Netlify not to re-bundle
+  node_bundler = "none"
 
 [dev]
   command = "npm run dev"
   port = 3000
-
-[[edge_functions]]
-  path = "/.netlify/edge-functions/env-config"
-  function = "env-config"
 
 [[redirects]]
   from = "/api/*"
