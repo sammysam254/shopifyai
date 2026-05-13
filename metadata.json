@@ -1,0 +1,6 @@
+{
+  "name": "TrendToStore AI",
+  "description": "Global Trend-to-Store automation platform using Gemini AI to curate products and automate Shopify/Ad deployment.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
