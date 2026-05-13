@@ -3,30 +3,24 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
-import * as admin from 'firebase-admin';
-import { initializeApp, getApps, cert } from 'firebase-admin/app';
-import { getFirestore, FieldValue } from 'firebase-admin/firestore';
+import { createClient } from "@supabase/supabase-js";
 import fs from 'fs';
 
 dotenv.config();
 
-// Load Firebase Config
-const firebaseConfig = JSON.parse(fs.readFileSync('./firebase-applet-config.json', 'utf8'));
-
-// Initialize Firebase Admin
-let app;
-if (getApps().length === 0) {
-  app = initializeApp({
-    credential: admin.credential.applicationDefault()
-  });
-} else {
-  app = getApps()[0];
-}
-const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
-
 async function startServer() {
   const app = express();
   const PORT = 3000;
+
+  // Initialize Supabase Admin (Service Role)
+  const supabaseUrl = process.env.SUPABASE_URL || "";
+  const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+  const supabase = createClient(supabaseUrl, supabaseServiceKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false
+    }
+  });
 
   app.use(express.json());
 
@@ -77,15 +71,17 @@ async function startServer() {
       const jsonStr = text.replace(/```json/g, "").replace(/```/g, "").trim();
       const evaluation = JSON.parse(jsonStr);
 
-      // Update Firestore if id provided
+      // Update Supabase if id provided
       if (id) {
-        const productRef = db.collection("trending_products").doc(id);
-        await productRef.update({
-          status: evaluation.suitable ? "approved" : "rejected",
-          optimizedTitle: evaluation.optimizedTitle,
-          optimizedDescription: evaluation.optimizedDescription,
-          tags: evaluation.tags
-        });
+        await supabase
+          .from("trending_products")
+          .update({
+            status: evaluation.suitable ? "approved" : "rejected",
+            optimizedTitle: evaluation.optimizedTitle,
+            optimizedDescription: evaluation.optimizedDescription,
+            tags: evaluation.tags
+          })
+          .eq("id", id);
       }
 
       res.json(evaluation);
@@ -100,24 +96,31 @@ async function startServer() {
     try {
       const { id } = req.body;
       
-      const shopSnap = await db.collection("settings").doc("shopify").get();
-      if (!shopSnap.exists) {
+      const { data: shopSnap, error: shopError } = await supabase
+        .from("settings")
+        .select("*")
+        .eq("id", "shopify")
+        .single();
+
+      if (shopError || !shopSnap) {
         return res.status(400).json({ error: "Shopify not connected. Please authorize in your dashboard." });
       }
 
-      const { accessToken, shop } = shopSnap.data()!;
+      const { accessToken, shop } = shopSnap;
       console.log(`Syncing product ${id} to Shopify store: ${shop} with active session...`);
       
       // Simulate API verification of all requested scopes
       await new Promise(resolve => setTimeout(resolve, 1500));
 
       const shopifyUrl = `https://${shop}/products/${id}`;
-      const productRef = db.collection("trending_products").doc(id);
-      await productRef.update({
-        status: "synced_to_shopify",
-        shopifyUrl: shopifyUrl,
-        syncedAt: FieldValue.serverTimestamp()
-      });
+      await supabase
+        .from("trending_products")
+        .update({
+          status: "synced_to_shopify",
+          shopifyUrl: shopifyUrl,
+          syncedAt: new Date().toISOString()
+        })
+        .eq("id", id);
 
       res.json({ 
         success: true, 
@@ -138,10 +141,12 @@ async function startServer() {
       console.log(`Launching Meta Ads for product ${id}...`);
       await new Promise(resolve => setTimeout(resolve, 2000));
 
-      const productRef = db.collection("trending_products").doc(id);
-      await productRef.update({
-        status: "campaign_live"
-      });
+      await supabase
+        .from("trending_products")
+        .update({
+          status: "campaign_live"
+        })
+        .eq("id", id);
 
       res.json({ 
         success: true, 
@@ -189,13 +194,15 @@ async function startServer() {
       const data: any = await response.json();
       
       if (data.access_token) {
-        // Store in Firestore
-        const settingsRef = db.collection("settings").doc("shopify");
-        await settingsRef.set({
-          accessToken: data.access_token,
-          shop: shop,
-          connectedAt: new Date().toISOString()
-        });
+        // Store in Supabase
+        await supabase
+          .from("settings")
+          .upsert({
+            id: "shopify",
+            accessToken: data.access_token,
+            shop: shop,
+            connectedAt: new Date().toISOString()
+          });
 
         res.send(`
           <html>
@@ -228,10 +235,14 @@ async function startServer() {
 
   app.get("/api/shopify/status", async (req, res) => {
     try {
-      const docSnap = await db.collection("settings").doc("shopify").get();
+      const { data: docSnap } = await supabase
+        .from("settings")
+        .select("*")
+        .eq("id", "shopify")
+        .single();
 
-      if (docSnap.exists) {
-        res.json({ connected: true, shop: docSnap.data()?.shop });
+      if (docSnap) {
+        res.json({ connected: true, shop: docSnap.shop });
       } else {
         res.json({ connected: false });
       }
@@ -283,7 +294,7 @@ async function startServer() {
           sourceCountry: "UK",
           trendScore: 92,
           status: "pending_review",
-          createdAt: FieldValue.serverTimestamp(),
+          createdAt: new Date().toISOString(),
           ownerId: "system"
         },
         {
@@ -292,7 +303,7 @@ async function startServer() {
           sourceCountry: "USA",
           trendScore: 85,
           status: "pending_review",
-          createdAt: FieldValue.serverTimestamp(),
+          createdAt: new Date().toISOString(),
           ownerId: "system"
         },
         {
@@ -301,23 +312,29 @@ async function startServer() {
           sourceCountry: "Mars",
           trendScore: 999, // Invalid score
           status: "pending_review",
-          createdAt: FieldValue.serverTimestamp(),
+          createdAt: new Date().toISOString(),
           ownerId: "system"
         }
       ];
 
       const savedProducts = [];
-      const colRef = db.collection("trending_products");
 
       for (const trend of rawTrends) {
         const validation = validateTrendData(trend);
         
         if (validation.isValid) {
-          const docRef = await colRef.add({
-            ...trend,
-            createdAt: FieldValue.serverTimestamp()
-          });
-          savedProducts.push({ id: docRef.id, ...trend, createdAt: new Date().toISOString() });
+          const { data: insertedData, error } = await supabase
+            .from("trending_products")
+            .insert({
+              ...trend,
+              createdAt: new Date().toISOString()
+            })
+            .select()
+            .single();
+
+          if (insertedData) {
+            savedProducts.push(insertedData);
+          }
         } else {
           console.warn(`[INGEST REJECTED] ${trend.title || 'Unknown'}: ${validation.errors.join(", ")}`);
         }
@@ -337,13 +354,13 @@ async function startServer() {
   // List products from Firestore
   app.get("/api/products", async (req, res) => {
     try {
-      const snapshot = await db.collection("trending_products").get();
-      const products = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        createdAt: doc.data().createdAt?.toDate?.()?.toISOString() || new Date().toISOString()
-      }));
-      res.json(products);
+      const { data: products, error } = await supabase
+        .from("trending_products")
+        .select("*")
+        .order("createdAt", { ascending: false });
+      
+      if (error) throw error;
+      res.json(products || []);
     } catch (error) {
       console.error("Fetch Error:", error);
       res.status(500).json({ error: "Failed to fetch products" });
@@ -370,4 +387,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch(err => {
+  console.error("CRITICAL SERVER STARTUP ERROR:", err);
+  process.exit(1);
+});

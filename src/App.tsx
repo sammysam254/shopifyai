@@ -181,7 +181,7 @@ export default function App() {
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2 bg-slate-900 px-3 py-1 rounded-full border border-slate-700">
             <div className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]"></div>
-            <span className="text-[10px] font-mono uppercase tracking-wider">Firestore: Online</span>
+            <span className="text-[10px] font-mono uppercase tracking-wider">Supabase: Online</span>
           </div>
           <div className="flex items-center gap-2 bg-slate-900 px-3 py-1 rounded-full border border-slate-700">
             <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.6)]"></div>
