@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import serverless from "serverless-http";
@@ -21,20 +21,67 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey, {
   }
 });
 
-// Initialize Gemini
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY || ""
-});
+// Configuration loader helper
+async function getConfig() {
+  const config: Record<string, string> = {
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY || "",
+    SHOPIFY_CLIENT_ID: process.env.SHOPIFY_CLIENT_ID || "",
+    SHOPIFY_CLIENT_SECRET: process.env.SHOPIFY_CLIENT_SECRET || "",
+    SHOPIFY_SHOP_DOMAIN: process.env.SHOPIFY_SHOP_DOMAIN || "",
+    APP_URL: process.env.APP_URL || ""
+  };
+
+  // If critical keys are missing, try fetching from Supabase settings
+  if (!config.GEMINI_API_KEY || !config.SHOPIFY_CLIENT_ID) {
+    try {
+      const { data } = await supabase
+        .from("settings")
+        .select("*")
+        .eq("id", "secrets")
+        .single();
+      
+      if (data && data.config) {
+        config.GEMINI_API_KEY = config.GEMINI_API_KEY || data.config.GEMINI_API_KEY;
+        config.SHOPIFY_CLIENT_ID = config.SHOPIFY_CLIENT_ID || data.config.SHOPIFY_CLIENT_ID;
+        config.SHOPIFY_CLIENT_SECRET = config.SHOPIFY_CLIENT_SECRET || data.config.SHOPIFY_CLIENT_SECRET;
+        config.SHOPIFY_SHOP_DOMAIN = config.SHOPIFY_SHOP_DOMAIN || data.config.SHOPIFY_SHOP_DOMAIN;
+        config.APP_URL = config.APP_URL || data.config.APP_URL;
+      }
+    } catch (e) {
+      console.warn("Could not load secrets from Supabase:", e);
+    }
+  }
+
+  return config;
+}
+
+// Initialize Gemini lazily to allow config loading
+let aiClient: GoogleGenerativeAI | null = null;
+async function getAi() {
+  if (!aiClient) {
+    const config = await getConfig();
+    if (!config.GEMINI_API_KEY) {
+      throw new Error("GEMINI_API_KEY is not configured in env or Supabase");
+    }
+    aiClient = new GoogleGenerativeAI(config.GEMINI_API_KEY);
+  }
+  return aiClient;
+}
 
 // API Routes
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", environment: process.env.NODE_ENV });
+  res.json({ 
+    status: "ok", 
+    environment: process.env.NODE_ENV,
+    secretsLoaded: !!process.env.GEMINI_API_KEY || "checking_supabase"
+  });
 });
 
 // Evaluate Product
 app.post("/api/evaluate-product", async (req, res) => {
   try {
     const { id, title, sourceCountry, trendScore } = req.body;
+    const ai = await getAi();
     
     const prompt = `
       Evaluate this product for the North American (USA/Canada) market:
@@ -178,6 +225,11 @@ app.get("/api/scout-trends", async (req, res) => {
         .insert(trend)
         .select()
         .single();
+      
+      if (error) {
+        console.error("Supabase Insert Error:", error);
+        continue;
+      }
       if (data) savedProducts.push(data);
     }
 
@@ -188,20 +240,24 @@ app.get("/api/scout-trends", async (req, res) => {
 });
 
   // Shopify OAuth Integration
-  app.get("/api/shopify/auth", (req, res) => {
-    // If shop is not provided in query, check if one is hardcoded in env
-    const shop = req.query.shop || process.env.SHOPIFY_SHOP_DOMAIN;
+  app.get("/api/shopify/auth", async (req, res) => {
+    const config = await getConfig();
+    const shop = req.query.shop || config.SHOPIFY_SHOP_DOMAIN;
     
     if (!shop) {
       return res.status(400).json({ 
-        error: "Shop domain is required. Please provide a shop query parameter or set SHOPIFY_SHOP_DOMAIN env var." 
+        error: "Shop domain is required. Please provide a shop query parameter or set SHOPIFY_SHOP_DOMAIN in secrets." 
       });
     }
 
-    const client_id = process.env.SHOPIFY_CLIENT_ID;
+    const client_id = config.SHOPIFY_CLIENT_ID;
     const scopes = "read_products,write_products";
-    const redirect_uri = `${process.env.APP_URL}/api/shopify/callback`;
+    const redirect_uri = `${config.APP_URL || process.env.APP_URL}/api/shopify/callback`;
     
+    if (!client_id) {
+      return res.status(500).json({ error: "SHOPIFY_CLIENT_ID (API Key) is not configured. Add it to environment or Supabase secrets." });
+    }
+
     const authUrl = `https://${shop}.myshopify.com/admin/oauth/authorize?client_id=${client_id}&scope=${scopes}&redirect_uri=${redirect_uri}`;
     
     res.json({ url: authUrl });
@@ -209,6 +265,7 @@ app.get("/api/scout-trends", async (req, res) => {
 
   app.get("/api/shopify/callback", async (req, res) => {
     const { shop, code } = req.query;
+    const config = await getConfig();
     
     if (!shop || !code) {
       return res.status(400).send("Missing shop or code");
@@ -219,8 +276,8 @@ app.get("/api/scout-trends", async (req, res) => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          client_id: process.env.SHOPIFY_CLIENT_ID,
-          client_secret: process.env.SHOPIFY_CLIENT_SECRET,
+          client_id: config.SHOPIFY_CLIENT_ID,
+          client_secret: config.SHOPIFY_CLIENT_SECRET,
           code
         })
       });
@@ -297,7 +354,7 @@ if (process.env.NODE_ENV !== "production" && !process.env.NETLIFY) {
     
     app.use(vite.middlewares);
     
-    const PORT = process.env.PORT || 3000;
+    const PORT = Number(process.env.PORT) || 3000;
     app.listen(PORT, "0.0.0.0", () => {
       console.log(`Development server running at http://localhost:${PORT}`);
     });
@@ -312,7 +369,7 @@ if (process.env.NODE_ENV !== "production" && !process.env.NETLIFY) {
     res.sendFile(path.join(distPath, "index.html"));
   });
   
-  const PORT = process.env.PORT || 3000;
+    const PORT = Number(process.env.PORT) || 3000;
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Production server running at http://localhost:${PORT}`);
   });

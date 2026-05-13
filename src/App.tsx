@@ -24,21 +24,34 @@ export default function App() {
   const [shopifyStatus, setShopifyStatus] = useState<{ connected: boolean; shop?: string }>({ connected: false });
   const [isConnecting, setIsConnecting] = useState(false);
   const [connError, setConnError] = useState<string | null>(null);
+  const [initError, setInitError] = useState<string | null>(null);
 
   // Fetch initial data and Shopify status
   useEffect(() => {
     const init = async () => {
+      setInitError(null);
       try {
         const [prodRes, shopRes] = await Promise.all([
           fetch("/api/products"),
           fetch("/api/shopify/status")
         ]);
+
+        if (!prodRes.ok) {
+          const text = await prodRes.text();
+          throw new Error(`Products API error (${prodRes.status}): ${text.slice(0, 100)}`);
+        }
+        if (!shopRes.ok) {
+          const text = await shopRes.text();
+          throw new Error(`Shopify Status API error (${shopRes.status}): ${text.slice(0, 100)}`);
+        }
+
         const prodData = await prodRes.json();
         const shopData = await shopRes.json();
         setProducts(Array.isArray(prodData) ? prodData : []);
         setShopifyStatus(shopData);
-      } catch (error) {
+      } catch (error: any) {
         console.error("Initialization failed", error);
+        setInitError(error.message || "Unknown error during initialization");
       }
     };
     init();
@@ -68,11 +81,13 @@ export default function App() {
     try {
       // 1. Try automatic connect (checks if SHOPIFY_SHOP_DOMAIN is set on server)
       const autoRes = await fetch("/api/shopify/auth");
-      const autoData = await autoRes.json();
-
-      if (autoRes.ok && autoData.url) {
-        window.open(autoData.url, 'shopify_oauth', 'width=600,height=700');
-        return;
+      
+      if (autoRes.ok) {
+        const autoData = await autoRes.json();
+        if (autoData.url) {
+          window.open(autoData.url, 'shopify_oauth', 'width=600,height=700');
+          return;
+        }
       }
 
       // 2. If automatic fails, prompt user
@@ -100,6 +115,10 @@ export default function App() {
     setIsScouting(true);
     try {
       const response = await fetch("/api/scout-trends");
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Scouting API error (${response.status}): ${text.slice(0, 100)}`);
+      }
       const data = await response.json();
       setProducts(prev => [...(data.items || []), ...prev]);
     } catch (error) {
@@ -223,6 +242,24 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {initError && (
+        <div className="bg-red-500/10 border border-red-500/30 p-4 rounded-xl flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <XCircle className="w-5 h-5 text-red-500" />
+            <div>
+              <p className="text-xs font-bold text-red-500 uppercase tracking-widest">Initialization Error</p>
+              <p className="text-[11px] text-slate-400 font-mono">{initError}</p>
+            </div>
+          </div>
+          <button 
+            onClick={() => window.location.reload()}
+            className="text-[10px] bg-red-500 text-white px-3 py-1 rounded-lg font-bold uppercase"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Main Layout Grid */}
       <div className="flex-1 grid grid-cols-12 gap-6 overflow-hidden">
