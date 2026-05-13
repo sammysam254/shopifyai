@@ -2,14 +2,6 @@
   command = "npm run build"
   publish = "dist"
 
-[build.environment]
-  NODE_VERSION = "20"
-
-[functions]
-  directory = "netlify/functions"
-  # The function is pre-bundled by esbuild during build — tell Netlify not to re-bundle
-  node_bundler = "none"
-
 [dev]
   command = "npm run dev"
   port = 3000

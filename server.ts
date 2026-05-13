@@ -1,32 +1,27 @@
 import express from "express";
+import path from "path";
+import { createServer as createViteServer } from "vite";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import serverless from "serverless-http";
-import ws from "ws";
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
 
-// ---------------------------------------------------------------------------
-// Bootstrap constants — fallback values used when environment variables are
-// not injected by the host (e.g. Netlify free tier without dashboard env vars).
-// These are safe to have here because:
-//   • The repo should be private
-//   • The service role key is scoped to this Supabase project only
-//   • The proxy secret only unlocks the secrets-proxy edge function
-// ---------------------------------------------------------------------------
-const FALLBACK_SUPABASE_URL = "https://dmpnewnpihwqggjtbdvf.supabase.co";
-const FALLBACK_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRtcG5ld25waWh3cWdnanRiZHZmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODYyMDg4MywiZXhwIjoyMDk0MTk2ODgzfQ.5uPt8QDUAjrSIIITnWfhSpMcVEzt1OjHSEvLhr-n6Sg";
-const FALLBACK_PROXY_SECRET = "5e9726f41a172dea68dcf3c61eb1ed431d338314cbe6f7def981cba26b8e3e27";
+// Initialize Supabase Admin (Service Role)
+// --- [MANUAL CONFIGURATION] ---
+// If you are having trouble with environment variables, paste your Supabase details here:
+const SUPABASE_URL_OVERRIDE = "https://dmpnewnpihwqggjtbdvf.supabase.co"; // e.g. "https://xxxxxx.supabase.co"
+const SUPABASE_KEY_OVERRIDE = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRtcG5ld25waWh3cWdnanRiZHZmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODYyMDg4MywiZXhwIjoyMDk0MTk2ODgzfQ.5uPt8QDUAjrSIIITnWfhSpMcVEzt1OjHSEvLhr-n6Sg"; // e.g. "eyJhbG..."
+// -------------------------------
 
-const supabaseUrl        = process.env.SUPABASE_URL             || FALLBACK_SUPABASE_URL;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || FALLBACK_SUPABASE_KEY;
-const proxySecret        = process.env.PROXY_SECRET              || FALLBACK_PROXY_SECRET;
+const supabaseUrl = SUPABASE_URL_OVERRIDE || process.env.SUPABASE_URL || "https://placeholder-url.supabase.co";
+const supabaseServiceKey = SUPABASE_KEY_OVERRIDE || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 
-const isSupabaseConfigured = !!supabaseUrl && supabaseUrl !== "https://placeholder-url.supabase.co" && !!supabaseServiceKey;
+const isSupabaseConfigured = supabaseUrl !== "https://placeholder-url.supabase.co" && !!supabaseServiceKey;
 
 if (!isSupabaseConfigured) {
   console.error("CRITICAL: Supabase environment variables are missing. App will run in limited mode.");
@@ -36,143 +31,48 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey, {
   auth: {
     autoRefreshToken: false,
     persistSession: false
-  },
-  realtime: {
-    transport: ws
   }
 });
 
-// ---------------------------------------------------------------------------
-// Auto-connect Shopify if credentials are in vault
-// This runs once on cold start. If SHOPIFY_ACCESS_TOKEN and SHOPIFY_SHOP_DOMAIN
-// are set in Supabase secrets, the connection is auto-registered in the settings table.
-// ---------------------------------------------------------------------------
-async function autoConnectShopify() {
-  if (!isSupabaseConfigured) return;
-
-  try {
-    // Check if already connected
-    const { data: existing } = await supabase
-      .from("settings")
-      .select("id")
-      .eq("id", "shopify")
-      .single();
-
-    if (existing) {
-      console.log("[Shopify Auto-Connect] Already connected, skipping.");
-      return;
-    }
-
-    // Load secrets
-    const config = await getConfig();
-    const { SHOPIFY_ACCESS_TOKEN, SHOPIFY_SHOP_DOMAIN } = config;
-
-    if (!SHOPIFY_ACCESS_TOKEN || !SHOPIFY_SHOP_DOMAIN) {
-      console.log("[Shopify Auto-Connect] Credentials not found in vault, skipping.");
-      return;
-    }
-
-    // Fetch shop info using the access token
-    const fullShop = SHOPIFY_SHOP_DOMAIN.includes(".") 
-      ? SHOPIFY_SHOP_DOMAIN 
-      : `${SHOPIFY_SHOP_DOMAIN}.myshopify.com`;
-
-    const shopInfoRes = await fetch(`https://${fullShop}/admin/api/2024-01/shop.json`, {
-      headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN }
-    });
-
-    if (!shopInfoRes.ok) {
-      console.error("[Shopify Auto-Connect] Failed to fetch shop info:", shopInfoRes.status);
-      return;
-    }
-
-    const shopInfo: any = await shopInfoRes.json();
-    const displayName = shopInfo?.shop?.name || SHOPIFY_SHOP_DOMAIN;
-
-    // Save to settings table
-    await supabase
-      .from("settings")
-      .upsert({
-        id: "shopify",
-        accessToken: SHOPIFY_ACCESS_TOKEN,
-        shop: displayName,
-        config: { domain: SHOPIFY_SHOP_DOMAIN },
-        connectedAt: new Date().toISOString()
-      });
-
-    console.log(`[Shopify Auto-Connect] Successfully connected to ${displayName}`);
-  } catch (e) {
-    console.error("[Shopify Auto-Connect] Exception:", e);
-  }
-}
-
-// Run auto-connect on startup (non-blocking)
-autoConnectShopify();
-
-// ---------------------------------------------------------------------------
-// Secrets cache — fetched once from the Supabase secrets-proxy Edge Function.
-// TTL is 5 minutes so a redeploy of secrets takes effect quickly.
-// ---------------------------------------------------------------------------
-let secretsCache: Record<string, string> | null = null;
-let secretsCacheExpiry = 0;
-const SECRETS_TTL_MS = 5 * 60 * 1000; // 5 minutes
-
-async function fetchSecretsFromProxy(): Promise<Record<string, string>> {
-  const functionsUrl = process.env.SUPABASE_FUNCTIONS_URL || `${supabaseUrl}/functions/v1`;
-
-  if (!proxySecret) {
-    console.warn("[Secrets] PROXY_SECRET not set — skipping proxy fetch.");
-    return {};
-  }
-
-  try {
-    const res = await fetch(`${functionsUrl}/secrets-proxy`, {
-      method: "GET",
-      headers: {
-        "x-proxy-secret": proxySecret,
-        "Content-Type": "application/json",
-      },
-    });
-
-    if (!res.ok) {
-      console.error(`[Secrets] Proxy returned ${res.status}:`, await res.text());
-      return {};
-    }
-
-    const data = await res.json() as Record<string, string>;
-    console.log("[Secrets] Successfully loaded secrets from Supabase proxy.");
-    return data;
-  } catch (e) {
-    console.error("[Secrets] Failed to fetch from secrets-proxy:", e);
-    return {};
-  }
-}
-
-async function getSecrets(): Promise<Record<string, string>> {
-  const now = Date.now();
-  if (secretsCache && now < secretsCacheExpiry) {
-    return secretsCache;
-  }
-  secretsCache = await fetchSecretsFromProxy();
-  secretsCacheExpiry = now + SECRETS_TTL_MS;
-  return secretsCache;
-}
-
-// Configuration loader helper — merges env vars with proxy secrets.
-// Env vars always win (so local .env overrides work during development).
+// Configuration loader helper
 async function getConfig() {
-  const proxied = await getSecrets();
-
   const config: Record<string, string> = {
-    GEMINI_API_KEY:        process.env.GEMINI_API_KEY        || proxied.GEMINI_API_KEY        || "",
-    SHOPIFY_CLIENT_ID:     process.env.SHOPIFY_CLIENT_ID     || proxied.SHOPIFY_CLIENT_ID     || "",
-    SHOPIFY_CLIENT_SECRET: process.env.SHOPIFY_CLIENT_SECRET || proxied.SHOPIFY_CLIENT_SECRET || "",
-    SHOPIFY_SHOP_DOMAIN:   process.env.SHOPIFY_SHOP_DOMAIN   || proxied.SHOPIFY_SHOP_DOMAIN   || "",
-    SHOPIFY_ACCESS_TOKEN:  process.env.SHOPIFY_ACCESS_TOKEN  || proxied.SHOPIFY_ACCESS_TOKEN  || "",
-    APP_URL:               process.env.APP_URL               || proxied.APP_URL               || "",
-    META_ADS_ACCESS_TOKEN: process.env.META_ADS_ACCESS_TOKEN || proxied.META_ADS_ACCESS_TOKEN || "",
-    META_AD_ACCOUNT_ID:    process.env.META_AD_ACCOUNT_ID    || proxied.META_AD_ACCOUNT_ID    || "",
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY || "",
+    SHOPIFY_CLIENT_ID: process.env.SHOPIFY_CLIENT_ID || "",
+    SHOPIFY_CLIENT_SECRET: process.env.SHOPIFY_CLIENT_SECRET || "",
+    SHOPIFY_SHOP_DOMAIN: process.env.SHOPIFY_SHOP_DOMAIN || "",
+    APP_URL: process.env.APP_URL || "",
+    META_ADS_ACCESS_TOKEN: process.env.META_ADS_ACCESS_TOKEN || "",
+    META_AD_ACCOUNT_ID: process.env.META_AD_ACCOUNT_ID || ""
   };
+
+  // If critical keys are missing, try fetching from Supabase settings
+  if (isSupabaseConfigured && (!config.GEMINI_API_KEY || !config.SHOPIFY_CLIENT_ID || !config.META_ADS_ACCESS_TOKEN)) {
+    try {
+      const { data, error } = await supabase
+        .from("settings")
+        .select("*")
+        .eq("id", "secrets")
+        .single();
+      
+      if (error) {
+        if (error.code !== 'PGRST116') {
+          console.warn(`[Config] Supabase 'secrets' lookup failed:`, error.message);
+        }
+      } else if (data && data.config) {
+        config.GEMINI_API_KEY = config.GEMINI_API_KEY || data.config.GEMINI_API_KEY;
+        config.SHOPIFY_CLIENT_ID = config.SHOPIFY_CLIENT_ID || data.config.SHOPIFY_CLIENT_ID;
+        config.SHOPIFY_CLIENT_SECRET = config.SHOPIFY_CLIENT_SECRET || data.config.SHOPIFY_CLIENT_SECRET;
+        config.SHOPIFY_SHOP_DOMAIN = config.SHOPIFY_SHOP_DOMAIN || data.config.SHOPIFY_SHOP_DOMAIN;
+        config.APP_URL = config.APP_URL || data.config.APP_URL;
+        config.META_ADS_ACCESS_TOKEN = config.META_ADS_ACCESS_TOKEN || data.config.META_ADS_ACCESS_TOKEN;
+        config.META_AD_ACCOUNT_ID = config.META_AD_ACCOUNT_ID || data.config.META_AD_ACCOUNT_ID;
+        console.log("[Config] Loaded configuration from Supabase 'settings' table.");
+      }
+    } catch (e) {
+      console.warn("[Config] Exception loading secrets from Supabase:", e);
+    }
+  }
 
   // Sanitize SHOPIFY_SHOP_DOMAIN (extract handle from URL if needed)
   if (config.SHOPIFY_SHOP_DOMAIN) {
@@ -400,26 +300,13 @@ app.post("/api/marketing/launch", async (req, res) => {
 // Shopify Status
 app.get("/api/shopify/status", async (req, res) => {
   try {
-    // First check the settings table (set by auto-connect or OAuth)
     const { data: docSnap } = await supabase
       .from("settings")
       .select("*")
       .eq("id", "shopify")
       .single();
 
-    if (docSnap?.accessToken) {
-      return res.json({ connected: true, shop: docSnap.shop });
-    }
-
-    // Fallback: check if credentials exist in vault (auto-connect may still be running)
-    const config = await getConfig();
-    if (config.SHOPIFY_ACCESS_TOKEN && config.SHOPIFY_SHOP_DOMAIN) {
-      // Trigger auto-connect in background and return optimistic status
-      autoConnectShopify();
-      return res.json({ connected: true, shop: config.SHOPIFY_SHOP_DOMAIN });
-    }
-
-    res.json({ connected: false });
+    res.json({ connected: !!docSnap, shop: docSnap?.shop });
   } catch (error) {
     res.json({ connected: false });
   }
@@ -642,11 +529,33 @@ app.get("/api/products", async (req, res) => {
 // Export for Netlify Functions
 export const handler = serverless(app);
 
-// Local development: run with `npm run dev` (tsx server.ts)
-// Vite dev server is started separately — do not import vite here.
+// Local server setup
 if (process.env.NODE_ENV !== "production" && !process.env.NETLIFY) {
-  const PORT = Number(process.env.PORT) || 3000;
+  const startLocalServer = async () => {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    
+    app.use(vite.middlewares);
+    
+    const PORT = Number(process.env.PORT) || 3000;
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Development server running at http://localhost:${PORT}`);
+    });
+  };
+
+  startLocalServer();
+} else if (process.env.NODE_ENV === "production" && !process.env.NETLIFY) {
+  // Standard production server (non-serverless)
+  const distPath = path.join(process.cwd(), "dist");
+  app.use(express.static(distPath));
+  app.get("*", (req, res) => {
+    res.sendFile(path.join(distPath, "index.html"));
+  });
+  
+    const PORT = Number(process.env.PORT) || 3000;
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running at http://localhost:${PORT}`);
+    console.log(`Production server running at http://localhost:${PORT}`);
   });
 }
