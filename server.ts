@@ -4,6 +4,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import serverless from "serverless-http";
+import ws from "ws";
 
 dotenv.config();
 
@@ -36,6 +37,9 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey, {
   auth: {
     autoRefreshToken: false,
     persistSession: false
+  },
+  realtime: {
+    transport: ws
   }
 });
 
