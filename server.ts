@@ -40,7 +40,11 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey, {
 // ---------------------------------------------------------------------------
 let secretsCache: Record<string, string> | null = null;
 let secretsCacheExpiry = 0;
+<<<<<<< HEAD
 const SECRETS_TTL_MS = 30 * 1000;
+=======
+const SECRETS_TTL_MS = 30 * 1000; // 30 seconds
+>>>>>>> a07dc57 (fix: reduce secrets cache TTL to 30s, Meta Ads auto-connect from vault)
 
 async function fetchSecretsFromProxy(): Promise<Record<string, string>> {
   const functionsUrl = process.env.SUPABASE_FUNCTIONS_URL || `${supabaseUrl}/functions/v1`;
@@ -227,23 +231,60 @@ Return ONLY valid JSON:
 app.post("/api/sync-to-shopify", async (req, res) => {
   try {
     const { id, title, description, tags } = req.body;
-    const { data: shopSnap, error: shopError } = await supabase.from("settings").select("*").eq("id", "shopify").single();
-    if (shopError || !shopSnap?.accessToken) {
-      return res.status(400).json({ error: "Shopify not connected." });
+
+    // Try settings table first (set by auto-connect or OAuth)
+    let accessToken = "";
+    let fullShop = "";
+
+    const { data: shopSnap } = await supabase.from("settings").select("*").eq("id", "shopify").single();
+
+    if (shopSnap?.accessToken) {
+      accessToken = shopSnap.accessToken;
+      const shopDomain = shopSnap.config?.domain || shopSnap.shop;
+      fullShop = shopDomain.includes(".") ? shopDomain : `${shopDomain}.myshopify.com`;
+    } else {
+      // Fallback: use vault credentials directly
+      const config = await getConfig();
+      if (!config.SHOPIFY_ACCESS_TOKEN || !config.SHOPIFY_SHOP_DOMAIN) {
+        return res.status(400).json({ error: "Shopify not connected. Set SHOPIFY_ACCESS_TOKEN and SHOPIFY_SHOP_DOMAIN in Supabase vault." });
+      }
+      accessToken = config.SHOPIFY_ACCESS_TOKEN;
+      fullShop = config.SHOPIFY_SHOP_DOMAIN.includes(".") ? config.SHOPIFY_SHOP_DOMAIN : `${config.SHOPIFY_SHOP_DOMAIN}.myshopify.com`;
     }
-    const shopDomain = shopSnap.config?.domain || shopSnap.shop;
-    const fullShop = shopDomain.includes(".") ? shopDomain : `${shopDomain}.myshopify.com`;
+
+    console.log(`[Shopify Sync] Pushing product ${id} to ${fullShop}`);
+
     const response = await fetch(`https://${fullShop}/admin/api/2024-01/products.json`, {
       method: "POST",
-      headers: { "X-Shopify-Access-Token": shopSnap.accessToken, "Content-Type": "application/json" },
-      body: JSON.stringify({ product: { title, body_html: description, vendor: "TrendToStore AI", product_type: "Trending", tags: Array.isArray(tags) ? tags.join(", ") : tags, status: "draft" } })
+      headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        product: {
+          title,
+          body_html: description,
+          vendor: "TrendToStore AI",
+          product_type: "Trending",
+          tags: Array.isArray(tags) ? tags.join(", ") : tags,
+          status: "draft"
+        }
+      })
     });
+
     const shopifyData: any = await response.json();
+
     if (!response.ok || !shopifyData.product) {
+      console.error("[Shopify Sync] API Error:", JSON.stringify(shopifyData));
       return res.status(response.status).json({ error: shopifyData.errors || "Failed to create product on Shopify" });
     }
-    const shopifyUrl = `https://${fullShop}/admin/products/${shopifyData.product.id}`;
-    await supabase.from("trending_products").update({ status: "synced_to_shopify", shopify_url: shopifyUrl, synced_at: new Date().toISOString() }).eq("id", id);
+
+    const shopifyProductId = shopifyData.product.id;
+    const shopifyUrl = `https://${fullShop}/admin/products/${shopifyProductId}`;
+
+    await supabase.from("trending_products").update({
+      status: "synced_to_shopify",
+      shopify_url: shopifyUrl,
+      synced_at: new Date().toISOString()
+    }).eq("id", id);
+
     res.json({ success: true, shopifyUrl, status: "synced_to_shopify" });
   } catch (error) {
     console.error("[Shopify Sync] Exception:", error);

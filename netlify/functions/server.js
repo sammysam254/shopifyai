@@ -51442,6 +51442,64 @@ async function autoConnectShopify() {
   }
 }
 autoConnectShopify();
+<<<<<<< HEAD
+=======
+var secretsCache = null;
+var secretsCacheExpiry = 0;
+var SECRETS_TTL_MS = 30 * 1e3;
+async function fetchSecretsFromProxy() {
+  const functionsUrl = process.env.SUPABASE_FUNCTIONS_URL || `${supabaseUrl}/functions/v1`;
+  if (!proxySecret) {
+    console.warn("[Secrets] PROXY_SECRET not set \u2014 skipping proxy fetch.");
+    return {};
+  }
+  try {
+    const res = await fetch(`${functionsUrl}/secrets-proxy`, {
+      method: "GET",
+      headers: {
+        "x-proxy-secret": proxySecret,
+        "Content-Type": "application/json"
+      }
+    });
+    if (!res.ok) {
+      console.error(`[Secrets] Proxy returned ${res.status}:`, await res.text());
+      return {};
+    }
+    const data = await res.json();
+    console.log("[Secrets] Successfully loaded secrets from Supabase proxy.");
+    return data;
+  } catch (e) {
+    console.error("[Secrets] Failed to fetch from secrets-proxy:", e);
+    return {};
+  }
+}
+async function getSecrets() {
+  const now = Date.now();
+  if (secretsCache && now < secretsCacheExpiry) {
+    return secretsCache;
+  }
+  secretsCache = await fetchSecretsFromProxy();
+  secretsCacheExpiry = now + SECRETS_TTL_MS;
+  return secretsCache;
+}
+async function getConfig() {
+  const proxied = await getSecrets();
+  const config = {
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY || proxied.GEMINI_API_KEY || "",
+    SHOPIFY_CLIENT_ID: process.env.SHOPIFY_CLIENT_ID || proxied.SHOPIFY_CLIENT_ID || "",
+    SHOPIFY_CLIENT_SECRET: process.env.SHOPIFY_CLIENT_SECRET || proxied.SHOPIFY_CLIENT_SECRET || "",
+    SHOPIFY_SHOP_DOMAIN: process.env.SHOPIFY_SHOP_DOMAIN || proxied.SHOPIFY_SHOP_DOMAIN || "",
+    SHOPIFY_ACCESS_TOKEN: process.env.SHOPIFY_ACCESS_TOKEN || proxied.SHOPIFY_ACCESS_TOKEN || "",
+    APP_URL: process.env.APP_URL || proxied.APP_URL || "",
+    META_ADS_ACCESS_TOKEN: process.env.META_ADS_ACCESS_TOKEN || proxied.META_ADS_ACCESS_TOKEN || "",
+    META_AD_ACCOUNT_ID: process.env.META_AD_ACCOUNT_ID || proxied.META_AD_ACCOUNT_ID || ""
+  };
+  if (config.SHOPIFY_SHOP_DOMAIN) {
+    config.SHOPIFY_SHOP_DOMAIN = config.SHOPIFY_SHOP_DOMAIN.replace(/^https?:\/\//, "").replace(/\.myshopify\.com\/?$/, "").replace(/\/$/, "");
+  }
+  return config;
+}
+>>>>>>> a07dc57 (fix: reduce secrets cache TTL to 30s, Meta Ads auto-connect from vault)
 var aiClient = null;
 var GEMINI_MODEL_FALLBACKS = [
   "gemini-2.0-flash-lite",

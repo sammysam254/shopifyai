@@ -65,17 +65,16 @@ export default function App() {
 
   const connectMetaAds = async () => {
     setIsConnectingMeta(true);
-    // Simple mock connection as user requested "API AC" (Active)
-    const token = prompt("Enter Meta Ads Access Token (or 'MOCK' for demo):");
-    if (!token) {
+    try {
+      const res = await fetch("/api/marketing/status");
+      const data = await res.json();
+      setMetaAdsStatus({ connected: data.connected });
+      if (!data.connected) alert("META_ADS_ACCESS_TOKEN not set in Supabase vault. Run: supabase secrets set META_ADS_ACCESS_TOKEN=your-token");
+    } catch (e) {
+      console.error("Meta Ads status check failed", e);
+    } finally {
       setIsConnectingMeta(false);
-      return;
     }
-    
-    // In a real app, we'd save this to Supabase
-    setMetaAdsStatus({ connected: true });
-    setIsConnectingMeta(false);
-    alert("Meta Ads API connected successfully.");
   };
 
   // Listen for Shopify OAuth success
@@ -613,13 +612,26 @@ export default function App() {
                         )}
 
                         {product.status === ProductStatus.SYNCED && (
-                          <button 
-                            onClick={() => launchCampaign(product)}
-                            className="flex-1 flex items-center justify-center gap-2 bg-emerald-600 text-white py-2.5 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-500 transition-all shadow-[0_0_20px_rgba(16,185,129,0.2)]"
-                          >
-                            <Rocket className="w-3.5 h-3.5" />
-                            <span>Launch Meta Ads Campaign</span>
-                          </button>
+                          <div className="flex-1 flex flex-col gap-2">
+                            {product.shopify_url && (
+                              <a
+                                href={product.shopify_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center justify-center gap-2 bg-slate-800 border border-emerald-500/40 text-emerald-400 py-2 rounded-xl text-[10px] font-mono uppercase font-bold hover:bg-emerald-500/10 transition-all"
+                              >
+                                <ExternalLink className="w-3 h-3" />
+                                <span>View on Shopify</span>
+                              </a>
+                            )}
+                            <button
+                              onClick={() => launchCampaign(product)}
+                              className="flex-1 flex items-center justify-center gap-2 bg-emerald-600 text-white py-2.5 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-500 transition-all shadow-[0_0_20px_rgba(16,185,129,0.2)]"
+                            >
+                              <Rocket className="w-3.5 h-3.5" />
+                              <span>Launch Meta Ads Campaign</span>
+                            </button>
+                          </div>
                         )}
 
                         {product.status === ProductStatus.CAMPAIGN_LIVE && (
